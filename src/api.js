@@ -78,6 +78,18 @@ export async function fetchDetail(resource, index) {
   return json;
 }
 
+// Look up a single name across the SRD and return formatted rules text,
+// preferring an exact name match. Used by "Fetch from 5e SRD" buttons.
+export async function describe(name) {
+  const results = await search(name);
+  if (!results.length) return null;
+  const target = name.trim().toLowerCase();
+  const exact = results.find((r) => r.name.toLowerCase() === target);
+  const pick = exact || results[0];
+  const raw = await fetchDetail(pick.resource, pick.index);
+  return formatDetail(pick.resource, raw);
+}
+
 // Turn an API record into readable rules text for storing/display.
 export function formatDetail(resource, d) {
   if (!d) return "";
