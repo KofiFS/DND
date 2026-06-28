@@ -1,0 +1,18 @@
+{
+  "name": "D&D Character Sheet",
+  "short_name": "D&D Sheet",
+  "description": "Auto-saving D&D character sheet with live 5e SRD lookups",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f0804",
+  "theme_color": "#1a0a02",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
