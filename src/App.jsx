@@ -739,16 +739,18 @@ function CodexTab({ styles, setLore, update, SectionTitle }) {
       update(c => ({ ...c, features: c.features.includes(name) ? c.features : [...c.features, name], lore: { ...c.lore, [name]: text || c.lore[name] } }));
     } else if (target === "gear") {
       update(c => ({ ...c, equipment: c.equipment.includes(name) ? c.equipment : [...c.equipment, name], lore: { ...c.lore, [name]: text || c.lore[name] } }));
+    } else if (target === "note") {
+      update(c => ({ ...c, notes: (c.notes ? c.notes + "\n\n" : "") + `【${name}】\n${text}` }));
     }
   };
 
-  const chipColor = { Spell: "#7a1c1c", Feature: "#3d6a1c", Trait: "#1c4a7a", Gear: "#5c2b0a", Condition: "#6a1c6a", "Magic Item": "#8a5a00" };
+  const chipColor = { Spell: "#7a1c1c", Feature: "#3d6a1c", Trait: "#1c4a7a", Gear: "#5c2b0a", Condition: "#6a1c6a", "Magic Item": "#8a5a00", Monster: "#1c5a4a", Race: "#2a4a7a" };
 
   return (
     <div>
       <SectionTitle>Codex — 5e Rules Lookup</SectionTitle>
       <div style={{ fontSize: "0.8rem", color: PALETTE.inkSoft, marginBottom: 10, lineHeight: 1.45 }}>
-        Search official D&D 5e spells, features, traits, gear and conditions. Tap a result to read it, then add it to your sheet — its rules text is saved so you can read it again later, even offline.
+        Search official D&D 5e spells, features, traits, gear, conditions, monsters and races. Misspellings are okay — it suggests the closest match. Tap a result to read it, then add it to your sheet (or save it to Notes). Saved rules text can be read again later, even offline.
       </div>
       <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="e.g. Fireball, Darkvision, Rage…"
         style={{ width: "100%", boxSizing: "border-box", background: "rgba(201,136,42,0.1)", border: `1px solid ${PALETTE.gold}`, borderRadius: 10, color: PALETTE.ink, fontFamily: "'Crimson Text',serif", fontSize: "1rem", padding: "10px 13px" }} />
@@ -756,7 +758,10 @@ function CodexTab({ styles, setLore, update, SectionTitle }) {
       <div style={{ marginTop: 10 }}>
         {status === "loading" && <div style={{ color: PALETTE.inkSoft, fontSize: "0.82rem", padding: "8px 0" }}>Searching…</div>}
         {status === "error" && <div style={{ color: PALETTE.rust, fontSize: "0.82rem", padding: "8px 0" }}>Couldn’t reach the SRD API. Check your connection and try again.</div>}
-        {status === "done" && results.length === 0 && <div style={{ color: PALETTE.inkSoft, fontSize: "0.82rem", padding: "8px 0" }}>No matches found.</div>}
+        {status === "done" && results.length === 0 && <div style={{ color: PALETTE.inkSoft, fontSize: "0.82rem", padding: "8px 0" }}>No matches found — try fewer letters.</div>}
+        {status === "done" && results.length > 0 && results[0].fuzzy && (
+          <div style={{ color: PALETTE.rust, fontSize: "0.78rem", fontStyle: "italic", padding: "2px 0 8px" }}>No exact match — showing closest results:</div>
+        )}
 
         {results.map(item => {
           const key = `${item.resource}/${item.index}`;
@@ -768,6 +773,7 @@ function CodexTab({ styles, setLore, update, SectionTitle }) {
                   {item.label}{item.resource === "spells" ? ` ${item.level === 0 ? "C" : item.level}` : ""}
                 </span>
                 <span style={{ flex: 1, fontSize: "0.92rem", color: PALETTE.ink }}>{item.name}</span>
+                {item.fuzzy && <span title="Closest match" style={{ color: PALETTE.gold, fontSize: "0.8rem" }}>≈</span>}
                 <span style={{ color: PALETTE.inkSoft, fontSize: "0.8rem" }}>{isOpen ? "▾" : "▸"}</span>
               </div>
               {isOpen && (
@@ -779,6 +785,7 @@ function CodexTab({ styles, setLore, update, SectionTitle }) {
                         {item.resource === "spells" && <button style={styles.addBtn} onClick={() => addEntry(item, "spell")}>+ Add Spell</button>}
                         {(item.resource === "features" || item.resource === "traits" || item.resource === "conditions") && <button style={styles.addBtn} onClick={() => addEntry(item, "feature")}>+ Add Feature</button>}
                         {(item.resource === "equipment" || item.resource === "magic-items") && <button style={styles.addBtn} onClick={() => addEntry(item, "gear")}>+ Add to Gear</button>}
+                        <button style={{ ...styles.addBtn, background: "transparent", color: PALETTE.rust, borderColor: PALETTE.rust }} onClick={() => addEntry(item, "note")}>+ Notes</button>
                       </div>
                     </>
                   )}
