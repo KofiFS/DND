@@ -1,23 +1,29 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { search as srdSearch, fetchDetail, formatDetail, describe } from "./api.js";
 import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage } from "./idb.js";
+import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText, meetsPrereq } from "./warlock.js";
 
 const STORAGE_KEY = "dnd-sheet-v1";
 
+const SHEET_VERSION = 2;
+
 const INITIAL_CHARACTER = {
+  sheetVersion: SHEET_VERSION,
   name: "Arc-Elf Tanner",
-  class: "Warlock 3 / Lock",
+  class: "Warlock 4",
   race: "Orc/Elf",
   background: "Watching",
-  level: 3,
+  level: 4,
   proficiencyBonus: 2,
+  patron: "Archfey",
+  pact: "",
   abilities: {
-    strength: 11, dexterity: 12, constitution: 14,
+    strength: 13, dexterity: 12, constitution: 14,
     intelligence: 12, wisdom: 13, charisma: 14,
   },
   combat: {
     ac: 12, initiative: 1, speed: 30,
-    hp: 26, maxHp: 26, tempHp: 0, hitDice: "3d6",
+    hp: 42, maxHp: 42, tempHp: 0, hitDice: "4d8",
   },
   deathSaves: { successes: 0, failures: 0 },
   savingThrows: {
@@ -55,8 +61,8 @@ const INITIAL_CHARACTER = {
   proficiencies: "Thieves' Tools, Simple Weapons, Light Armor",
   spellcasting: { ability: "CHA", saveDC: 12, attackBonus: 4 },
   spells: {
-    cantrips: ["Minor Illusion", "Thunderclap"],
-    level1: ["Charm Person", "Unseen Servant", "Illusory Script", "Sleep", "Faerie Fire"],
+    cantrips: ["Minor Illusion", "Thunderclap", "Eldritch Blast"],
+    level1: ["Charm Person", "Unseen Servant", "Illusory Script", "Sleep", "Faerie Fire", "Hex"],
     level2: ["Hold Person", "Phantasmal Force", "Mirror Step", "Calm Emotions"],
     level3: [], level4: [], level5: [],
   },
@@ -90,6 +96,7 @@ const dieAvg = (size) => Math.floor(size / 2) + 1;
 // Merge a stored character with the initial shape so new fields always exist.
 function hydrate(stored) {
   if (!stored || typeof stored !== "object") return INITIAL_CHARACTER;
+  stored = migrate(stored);
   return {
     ...INITIAL_CHARACTER,
     ...stored,
@@ -102,6 +109,32 @@ function hydrate(stored) {
     spells: { ...INITIAL_CHARACTER.spells, ...stored.spells },
     lore: { ...(stored.lore || {}) },
   };
+}
+
+// One-time upgrades applied to sheets saved by older versions of the app.
+function migrate(c) {
+  const v = c.sheetVersion || 1;
+  if (v < 2) {
+    // Level 4: +2 STR ASI, max HP 42, d8 hit dice, Eldritch Blast + Hex, Archfey patron.
+    const wasFull = c.combat?.hp === c.combat?.maxHp;
+    const level = Math.max(4, c.level || 1);
+    const cantrips = c.spells?.cantrips || [];
+    const level1 = c.spells?.level1 || [];
+    c = {
+      ...c,
+      level, proficiencyBonus: pbFromLevel(level),
+      class: /^warlock 3/i.test(c.class || "") ? "Warlock 4" : c.class,
+      patron: c.patron || "Archfey",
+      abilities: { ...c.abilities, strength: (c.abilities?.strength ?? 11) + 2 },
+      combat: { ...c.combat, maxHp: Math.max(42, c.combat?.maxHp || 0), hp: wasFull ? Math.max(42, c.combat?.maxHp || 0) : c.combat?.hp, hitDice: `${level}d8` },
+      spells: {
+        ...c.spells,
+        cantrips: cantrips.includes("Eldritch Blast") ? cantrips : [...cantrips, "Eldritch Blast"],
+        level1: level1.includes("Hex") ? level1 : [...level1, "Hex"],
+      },
+    };
+  }
+  return { ...c, sheetVersion: SHEET_VERSION };
 }
 
 // ── Inline editable field ──
@@ -260,7 +293,13 @@ export default function DnDSheet() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setChar(hydrate(JSON.parse(raw)));
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const h = hydrate(parsed);
+        setChar(h);
+        // Persist one-time migrations immediately so they aren't re-applied.
+        if (h.sheetVersion !== parsed.sheetVersion) localStorage.setItem(STORAGE_KEY, JSON.stringify(h));
+      }
     } catch {}
   }, []);
 
@@ -323,6 +362,7 @@ export default function DnDSheet() {
     { id: "skills", label: "Skills", icon: "✦" },
     { id: "combat", label: "Combat", icon: "⚔" },
     { id: "spells", label: "Spells", icon: "✷" },
+    { id: "class", label: "Class", icon: "☽" },
     { id: "gear", label: "Gear", icon: "⚙" },
     { id: "codex", label: "Codex", icon: "❡" },
     { id: "paper", label: "Paper", icon: "❒" },
@@ -657,6 +697,7 @@ export default function DnDSheet() {
         {tab === "combat" && combatTab()}
         {tab === "spells" && spellsTab()}
         {tab === "gear" && gearTab()}
+        {tab === "class" && <ClassTab char={s} update={update} setLore={setLore} styles={styles} SectionTitle={SectionTitle} />}
         {tab === "codex" && <CodexTab styles={styles} setLore={setLore} update={update} SectionTitle={SectionTitle} />}
         {tab === "paper" && <PhotoTab styles={styles} SectionTitle={SectionTitle} />}
       </div>
@@ -686,6 +727,172 @@ function AddInline({ value, setValue, onAdd, onCancel, placeholder, styles }) {
         placeholder={placeholder} style={styles.input} />
       <button style={styles.addBtn} onClick={onAdd}>Add</button>
       <button style={{ ...styles.addBtn, background: "transparent", color: "#8b5e1a" }} onClick={onCancel}>×</button>
+    </div>
+  );
+}
+
+// ── CLASS (Warlock rules at your level) ──
+function ClassTab({ char, update, setLore, styles, SectionTitle }) {
+  const level = char.level || 1;
+  const row = rowFor(level);
+  const patron = PATRONS[char.patron] ? char.patron : "Archfey";
+  const pdata = PATRONS[patron];
+  const [showAll, setShowAll] = useState(false);
+  const [invFilter, setInvFilter] = useState("available");
+
+  const cantripsKnown = char.spells.cantrips.length;
+  const spellsKnown = Object.entries(char.spells).filter(([k]) => k !== "cantrips").reduce((n, [, arr]) => n + arr.length, 0);
+  const invNames = INVOCATIONS.map((i) => i.name);
+  const invocationsHeld = char.features.filter((f) => invNames.includes(f));
+  const ctx = { level, cantrips: char.spells.cantrips, pact: char.pact };
+
+  const hasFeature = (name) => char.features.includes(name);
+  const addFeature = (name, desc) => update((c) => ({
+    ...c,
+    features: c.features.includes(name) ? c.features : [...c.features, name],
+    lore: { ...c.lore, [name]: c.lore[name] || desc },
+  }));
+  const removeFeature = (name) => update((c) => ({ ...c, features: c.features.filter((f) => f !== name) }));
+  const hasSpell = (name) => Object.values(char.spells).some((arr) => arr.includes(name));
+  const addSpell = (lvl, name) => update((c) => {
+    const key = `level${lvl}`;
+    const bucket = c.spells[key] || [];
+    return bucket.includes(name) ? c : { ...c, spells: { ...c.spells, [key]: [...bucket, name] } };
+  });
+
+  const Stat = ({ label, value, sub, warn }) => (
+    <div style={{ flex: 1, textAlign: "center", border: `1px solid ${warn ? PALETTE.rust : "rgba(201,136,42,0.4)"}`, borderRadius: 10, padding: "8px 4px", background: warn ? "rgba(122,28,28,0.06)" : "rgba(201,136,42,0.06)" }}>
+      <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>{value}</div>
+      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.48rem", letterSpacing: 1.5, color: PALETTE.inkSoft, textTransform: "uppercase", marginTop: 2 }}>{label}</div>
+      {sub && <div style={{ fontSize: "0.68rem", color: warn ? PALETTE.rust : PALETTE.inkSoft, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+
+  const FeatureRow = ({ f, gained }) => {
+    const [open, setOpen] = useState(false);
+    return (
+      <div style={{ borderBottom: "1px solid rgba(139,94,26,0.14)", opacity: gained ? 1 : 0.55 }}>
+        <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0", cursor: "pointer" }}>
+          <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.gold, width: 26, flexShrink: 0 }}>L{f.level}</span>
+          <span style={{ flex: 1, fontSize: "0.9rem", color: PALETTE.ink }}>{f.name}</span>
+          {gained && (hasFeature(f.name)
+            ? <span style={{ fontSize: "0.62rem", color: PALETTE.green, fontFamily: "Cinzel,serif" }}>✓ on sheet</span>
+            : <button style={{ ...styles.smallBtn, padding: "3px 8px" }} onClick={(e) => { e.stopPropagation(); addFeature(f.name, f.desc); }}>+ Add</button>)}
+          <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+        </div>
+        {open && <div style={{ padding: "0 0 10px 35px", fontSize: "0.82rem", color: "#3d2b0a", lineHeight: 1.5 }}>{f.desc}</div>}
+      </div>
+    );
+  };
+
+  const invList = INVOCATIONS.filter((inv) => {
+    const held = hasFeature(inv.name);
+    if (invFilter === "held") return held;
+    if (invFilter === "available") return held || meetsPrereq(inv.prereq, ctx);
+    return true;
+  });
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>Warlock {level}</div>
+        <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.62rem", color: PALETTE.inkSoft }}>
+          Patron:{" "}
+          <select value={patron} onChange={(e) => update((c) => ({ ...c, patron: e.target.value }))}
+            style={{ fontFamily: "inherit", fontSize: "0.7rem", background: "rgba(201,136,42,0.1)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.ink, padding: "2px 4px" }}>
+            {Object.keys(PATRONS).map((p) => <option key={p}>{p}</option>)}
+          </select>
+          {" · "}Pact:{" "}
+          <select value={char.pact || ""} onChange={(e) => update((c) => ({ ...c, pact: e.target.value }))}
+            style={{ fontFamily: "inherit", fontSize: "0.7rem", background: "rgba(201,136,42,0.1)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.ink, padding: "2px 4px" }}>
+            <option value="">—</option>{["Chain", "Blade", "Tome"].map((p) => <option key={p}>{p}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <SectionTitle>At Your Level</SectionTitle>
+      <div style={{ display: "flex", gap: 6 }}>
+        <Stat label="Spell Slots" value={row.slots} sub={`${row.slotLevel}${["st", "nd", "rd"][row.slotLevel - 1] || "th"} level`} />
+        <Stat label="Cantrips" value={row.cantrips} sub={`have ${cantripsKnown}`} warn={cantripsKnown !== row.cantrips} />
+        <Stat label="Spells Known" value={row.spellsKnown} sub={`have ${spellsKnown}`} warn={spellsKnown !== row.spellsKnown} />
+        <Stat label="Invocations" value={row.invocations} sub={`have ${invocationsHeld.length}`} warn={invocationsHeld.length !== row.invocations} />
+      </div>
+      <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 6, lineHeight: 1.45 }}>
+        Pact Magic slots come back on a <b>short</b> rest. Red boxes mean your sheet doesn't match the table for level {level}.
+      </div>
+
+      <SectionTitle>Class Features</SectionTitle>
+      <div style={styles.card}>
+        {CLASS_FEATURES.filter((f) => showAll || f.level <= level).map((f) => <FeatureRow key={f.name} f={f} gained={f.level <= level} />)}
+        <button style={{ ...styles.smallBtn, marginTop: 8 }} onClick={() => setShowAll((v) => !v)}>{showAll ? "Hide future levels" : "Show future levels"}</button>
+      </div>
+
+      <SectionTitle>The {patron}</SectionTitle>
+      <div style={styles.card}>
+        {pdata.features.filter((f) => showAll || f.level <= level).map((f) => <FeatureRow key={f.name} f={f} gained={f.level <= level} />)}
+        <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1.5, color: PALETTE.rust, textTransform: "uppercase", margin: "12px 0 4px" }}>Expanded spell list</div>
+        {Object.entries(pdata.spells).map(([lvl, names]) => (
+          <div key={lvl} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: "0.84rem", opacity: Number(lvl) <= row.slotLevel ? 1 : 0.5 }}>
+            <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.gold, width: 26 }}>{lvl}{["st", "nd", "rd"][lvl - 1] || "th"}</span>
+            <span style={{ flex: 1, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {names.map((n) => hasSpell(n)
+                ? <span key={n} style={{ color: PALETTE.green }}>✓ {n}</span>
+                : <button key={n} disabled={Number(lvl) > row.slotLevel} style={{ ...styles.smallBtn, padding: "2px 7px", textTransform: "none", letterSpacing: 0, fontFamily: "inherit", fontSize: "0.8rem" }} onClick={() => addSpell(lvl, n)}>+ {n}</button>)}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <SectionTitle>Eldritch Invocations</SectionTitle>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        {[["available", "Available"], ["held", "Mine"], ["all", "All"]].map(([k, l]) => (
+          <button key={k} onClick={() => setInvFilter(k)} style={{ ...styles.smallBtn, background: invFilter === k ? `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})` : "rgba(61,26,5,0.08)", color: invFilter === k ? PALETTE.goldLt : PALETTE.darkB }}>{l}</button>
+        ))}
+      </div>
+      <div style={styles.card}>
+        {invList.map((inv) => <InvocationRow key={inv.name} inv={inv} held={hasFeature(inv.name)} ok={meetsPrereq(inv.prereq, ctx)}
+          onAdd={() => addFeature(inv.name, inv.desc)} onRemove={() => removeFeature(inv.name)} styles={styles} />)}
+        {!invList.length && <div style={{ fontSize: "0.8rem", color: PALETTE.inkSoft }}>Nothing here yet.</div>}
+      </div>
+
+      <SectionTitle>Warlock Table</SectionTitle>
+      <div style={{ ...styles.card, padding: "6px 8px", overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.74rem", fontFamily: "Cinzel,serif" }}>
+          <thead>
+            <tr style={{ color: PALETTE.rust, fontSize: "0.5rem", letterSpacing: 1, textTransform: "uppercase" }}>
+              {["Lv", "PB", "Cant", "Spells", "Slots", "Slot Lv", "Invoc"].map((h) => <th key={h} style={{ padding: "3px 4px", textAlign: "center", borderBottom: `1px solid ${PALETTE.gold}` }}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {WARLOCK_TABLE.map((r) => (
+              <tr key={r.level} style={{ background: r.level === level ? "rgba(201,136,42,0.25)" : "transparent", color: r.level === level ? PALETTE.rust : r.level < level ? PALETTE.inkSoft : PALETTE.ink, fontWeight: r.level === level ? 700 : 400 }}>
+                {[r.level, `+${r.pb}`, r.cantrips, r.spellsKnown, r.slots, `${r.slotLevel}`, r.invocations || "—"].map((v, i) => <td key={i} style={{ padding: "3px 4px", textAlign: "center", borderBottom: "1px solid rgba(139,94,26,0.12)" }}>{v}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function InvocationRow({ inv, held, ok, onAdd, onRemove, styles }) {
+  const [open, setOpen] = useState(false);
+  const pre = prereqText(inv.prereq);
+  return (
+    <div style={{ borderBottom: "1px solid rgba(139,94,26,0.14)", opacity: held || ok ? 1 : 0.5 }}>
+      <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0", cursor: "pointer" }}>
+        <span style={{ color: PALETTE.gold, fontSize: "0.72rem", width: 14, textAlign: "center" }}>✦</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: "0.9rem", color: PALETTE.ink }}>{inv.name}</span>
+          {pre && <span style={{ display: "block", fontSize: "0.66rem", color: ok ? PALETTE.inkSoft : PALETTE.rust }}>Requires {pre}</span>}
+        </span>
+        {held
+          ? <button style={{ ...styles.smallBtn, padding: "3px 8px", borderColor: PALETTE.rust, color: PALETTE.rust }} onClick={(e) => { e.stopPropagation(); onRemove(); }}>− Drop</button>
+          : <button style={{ ...styles.smallBtn, padding: "3px 8px" }} disabled={!ok} onClick={(e) => { e.stopPropagation(); onAdd(); }}>+ Take</button>}
+        <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open && <div style={{ padding: "0 0 10px 23px", fontSize: "0.82rem", color: "#3d2b0a", lineHeight: 1.5 }}>{inv.desc}</div>}
     </div>
   );
 }
