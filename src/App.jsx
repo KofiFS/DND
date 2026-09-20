@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { search as srdSearch, fetchDetail, formatDetail, describe } from "./api.js";
 import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage } from "./idb.js";
 import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText, meetsPrereq } from "./warlock.js";
+import { PALETTE } from "./theme.js";
+import MapsTab from "./MapsTab.jsx";
 
 const STORAGE_KEY = "dnd-sheet-v1";
 
@@ -82,11 +84,6 @@ const SKILL_LABELS = {
 
 const ABILITY_SHORT = { strength: "STR", dexterity: "DEX", constitution: "CON", intelligence: "INT", wisdom: "WIS", charisma: "CHA" };
 
-const PALETTE = {
-  ink: "#2a1a0c", inkSoft: "#5c4422", gold: "#c9882a", goldLt: "#e8b84b",
-  rust: "#7a1c1c", green: "#3d6a1c", parchment: "#f5ead6",
-  darkA: "#1a0a02", darkB: "#3d1a05", darkC: "#5c2b0a",
-};
 
 const getMod = (score) => Math.floor((score - 10) / 2);
 const fmtMod = (n) => (n >= 0 ? `+${n}` : `${n}`);
@@ -365,6 +362,7 @@ export default function DnDSheet() {
     { id: "class", label: "Class", icon: "☽" },
     { id: "gear", label: "Gear", icon: "⚙" },
     { id: "codex", label: "Codex", icon: "❡" },
+    { id: "maps", label: "Maps", icon: "⌖" },
     { id: "paper", label: "Paper", icon: "❒" },
   ];
 
@@ -699,6 +697,7 @@ export default function DnDSheet() {
         {tab === "gear" && gearTab()}
         {tab === "class" && <ClassTab char={s} update={update} setLore={setLore} styles={styles} SectionTitle={SectionTitle} />}
         {tab === "codex" && <CodexTab styles={styles} setLore={setLore} update={update} SectionTitle={SectionTitle} />}
+        {tab === "maps" && <MapsTab styles={styles} SectionTitle={SectionTitle} />}
         {tab === "paper" && <PhotoTab styles={styles} SectionTitle={SectionTitle} />}
       </div>
 

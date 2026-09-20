@@ -7,12 +7,16 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
 ## Features
 
 - **Auto-saves** to your browser as you edit (no save button needed).
-- **Tabs:** Stats, Skills, Combat, Spells, Gear, and a **Codex**.
+- **Tabs:** Stats, Skills, Combat, Spells, Class, Gear, Codex, **Maps** and Paper.
 - **Notes** field for session notes, lore, and reminders.
 - **Codex** — search the official [D&D 5e SRD](https://www.dnd5eapi.co) for spells,
   features, traits, gear, conditions and magic items. Read what they do and add
   them to your sheet in one tap. The rules text is saved with the entry, so you can
   re-read it later (even offline) via the **Info** button next to it.
+- **Maps** — Upload your region or battle map PNGs, then drop pins for the party,
+  each character, enemies and places. Drag a pin to move it as you travel, pinch or
+  scroll to zoom, and open the map fullscreen. Pins are stored as a fraction of the
+  image, so they stay put at any zoom level and on any screen size.
 - **Backup** — Export your character to a JSON file and Import it on another device
   (Stats tab → Backup).
 
@@ -21,6 +25,9 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
 Your sheet is stored locally in each browser (`localStorage`). It persists across
 visits on the same device. To move a character to another device, use
 **Export JSON** on one device and **Import JSON** on the other.
+
+Maps and sheet photos are larger, so they live in IndexedDB instead. They stay on
+the device they were uploaded to and are **not** included in the JSON export.
 
 > Tip on a phone: open the live link, then "Add to Home Screen" to use it like an app.
 
