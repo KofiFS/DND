@@ -22,9 +22,10 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
 - **Limited uses** — Expand any feature and tap *Track limited uses* to give it
   use pips and a **Use** button. Whether it recharges on a short or long rest is
   read off its own rules text.
-- **Concentration** — Casting a spell whose description calls for concentration
-  shows a badge on the Spells tab; casting another replaces it. One tap rolls the
-  CON save, and any rest ends it.
+- **Concentration** — Expand a spell and tap *Concentrate on this* to mark it, or
+  let it be picked up automatically when the spell's description calls for it.
+  A badge on the Spells tab shows what you are holding; marking another replaces
+  it. One tap rolls the CON save, and any rest ends it.
 - **Rests** — On the Combat tab. **Short Rest** returns every Pact Magic slot;
   heal by spending hit dice, which roll and add the result to your HP.
   **Long Rest** restores full HP, clears temp HP, returns all slots and half your

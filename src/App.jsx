@@ -200,7 +200,7 @@ function AbilityBlock({ name, score, onChange, onRoll }) {
 }
 
 // ── Entry row with expandable, editable, fetchable description ──
-function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled, uses, styles }) {
+function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled, uses, conc, styles }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -226,6 +226,10 @@ function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled,
         <span style={{ flex: 1, fontSize: "0.92rem", color: PALETTE.ink }}>{name}</span>
         {hasDesc && <span title="Has a description" style={{ width: 6, height: 6, borderRadius: "50%", background: PALETTE.green, flexShrink: 0 }} />}
         <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+        {conc?.active && (
+          <span title="You are concentrating on this"
+            style={{ color: PALETTE.green, fontSize: "0.8rem", flexShrink: 0 }}>◎</span>
+        )}
         {uses && uses.max > 0 && (
           <span style={{ display: "flex", gap: 3, flexShrink: 0 }} title={`${uses.max - uses.used} of ${uses.max} left · recharges on a ${uses.recharge} rest`}>
             {Array.from({ length: Math.min(uses.max, 6) }, (_, i) => (
@@ -268,6 +272,16 @@ function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled,
             <button style={styles.smallBtn} onClick={fetchDesc} disabled={loading}>
               {loading ? "Fetching…" : "⟳ Fetch from 5e SRD"}
             </button>
+            {conc && (
+              <button style={{
+                ...styles.smallBtn,
+                borderColor: PALETTE.green,
+                background: conc.active ? `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})` : "rgba(61,106,28,0.1)",
+                color: conc.active ? PALETTE.goldLt : PALETTE.darkB,
+              }} onClick={conc.onToggle}>
+                ◎ {conc.active ? "Stop concentrating" : "Concentrate on this"}
+              </button>
+            )}
             {err && <span style={{ color: PALETTE.rust, fontSize: "0.72rem" }}>{err}</span>}
           </div>
           {uses && (
@@ -963,6 +977,10 @@ export default function DnDSheet() {
                 <EntryRow key={i} name={spell} icon="✷" desc={s.lore[spell]} styles={styles}
                   onSetDesc={(t) => setLore(spell, t)}
                   onCast={lvl === "cantrips" ? null : () => castSpell(spell)}
+                  conc={{
+                    active: s.concentration === spell,
+                    onToggle: () => update(c => ({ ...c, concentration: c.concentration === spell ? null : spell })),
+                  }}
                   castDisabled={open_ === 0}
                   onRemove={() => update(c => ({ ...c, spells: { ...c.spells, [lvl]: c.spells[lvl].filter((_, j) => j !== i) } }))} />
               ))}
