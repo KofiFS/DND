@@ -13,6 +13,11 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
   features, traits, gear, conditions and magic items. Read what they do and add
   them to your sheet in one tap. The rules text is saved with the entry, so you can
   re-read it later (even offline) via the **Info** button next to it.
+- **Dice** — A d20 button on every tab opens the dice tray: d4 through d100, a
+  count and bonus stepper, advantage/disadvantage, and any expression you type
+  (`2d6+3`, `1d8+1d6`). Natural 20s and 1s are called out, and the last 30 rolls
+  are kept. Tap any modifier on the sheet — an ability, a save, a skill,
+  initiative, a hit die, a death save — to roll it with the right bonus.
 - **Maps** — Upload your region or battle map PNGs, then drop pins for the party,
   each character, enemies and places. Drag a pin to move it as you travel, pinch or
   scroll to zoom, and open the map fullscreen. Pins are stored as a fraction of the

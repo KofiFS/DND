@@ -4,6 +4,7 @@ import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage } fro
 import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText, meetsPrereq } from "./warlock.js";
 import { PALETTE } from "./theme.js";
 import MapsTab from "./MapsTab.jsx";
+import DiceTray from "./DiceTray.jsx";
 
 const STORAGE_KEY = "dnd-sheet-v1";
 
@@ -160,7 +161,7 @@ function EditField({ value, onChange, style = {}, inputStyle = {}, multiline = f
   );
 }
 
-function AbilityBlock({ name, score, onChange }) {
+function AbilityBlock({ name, score, onChange, onRoll }) {
   const mod = getMod(score);
   return (
     <div style={{
@@ -170,7 +171,8 @@ function AbilityBlock({ name, score, onChange }) {
       boxShadow: "0 2px 6px rgba(0,0,0,0.25)",
     }}>
       <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 2, color: "#c9882aaa", textTransform: "uppercase", marginBottom: 1 }}>{name}</div>
-      <div style={{ fontFamily: "Cinzel,serif", fontSize: "1.05rem", color: PALETTE.goldLt, background: "rgba(201,136,42,0.18)", borderRadius: 6, padding: "0 4px", display: "inline-block", margin: "2px 0", minWidth: 34 }}>
+      <div onClick={onRoll} title={`Roll a ${name} check`}
+        style={{ fontFamily: "Cinzel,serif", fontSize: "1.05rem", color: PALETTE.goldLt, background: "rgba(201,136,42,0.18)", borderRadius: 6, padding: "0 4px", display: "inline-block", margin: "2px 0", minWidth: 34, cursor: onRoll ? "pointer" : "default", border: "1px solid rgba(201,136,42,0.45)" }}>
         {fmtMod(mod)}
       </div>
       <EditField value={score} onChange={v => onChange(Number(v))} type="number"
@@ -277,6 +279,10 @@ function LevelUpModal({ char, onApply, onClose, styles }) {
 export default function DnDSheet() {
   const [char, setChar] = useState(INITIAL_CHARACTER);
   const [tab, setTab] = useState("stats");
+  const diceRef = useRef(null);
+  // Roll a d20 check with the tray's current advantage setting.
+  const rollCheck = (mod, label) => diceRef.current?.rollCheck(mod, label);
+  const rollFor = (expr, label) => diceRef.current?.rollFor(expr, label);
   const [saved, setSaved] = useState(false);
   const [addingFeature, setAddingFeature] = useState(false);
   const [newFeature, setNewFeature] = useState("");
@@ -390,6 +396,7 @@ export default function DnDSheet() {
     smallBtn: { fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, textTransform: "uppercase", background: "rgba(61,26,5,0.08)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.darkB, padding: "5px 10px", cursor: "pointer" },
     removeBtn: { background: "none", border: "none", color: PALETTE.rust, cursor: "pointer", fontSize: "1rem", padding: "0 2px", lineHeight: 1, flexShrink: 0 },
     input: { flex: 1, background: "rgba(201,136,42,0.1)", border: `1px solid ${PALETTE.gold}`, borderRadius: 8, color: PALETTE.ink, fontFamily: "inherit", padding: "7px 10px", fontSize: "0.9rem" },
+    rollMod: { fontFamily: "Cinzel,serif", fontSize: "0.7rem", fontWeight: 700, color: "#3d2b0a", minWidth: 34, cursor: "pointer", border: "1px solid rgba(201,136,42,0.55)", borderRadius: 6, padding: "2px 0", textAlign: "center", background: "rgba(201,136,42,0.09)", flexShrink: 0 },
     hpBtn: { width: 38, height: 38, borderRadius: "50%", border: `1.5px solid ${PALETTE.gold}`, background: `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})`, color: PALETTE.goldLt, fontSize: "1.3rem", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, flexShrink: 0 },
   };
 
@@ -438,7 +445,8 @@ export default function DnDSheet() {
       <SectionTitle>Ability Scores</SectionTitle>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
         {Object.entries(s.abilities).map(([key, val]) => (
-          <AbilityBlock key={key} name={ABILITY_SHORT[key]} score={val} onChange={v => setAbility(key, v)} />
+          <AbilityBlock key={key} name={ABILITY_SHORT[key]} score={val} onChange={v => setAbility(key, v)}
+            onRoll={() => rollCheck(getMod(val), `${ABILITY_SHORT[key]} check`)} />
         ))}
       </div>
 
@@ -449,8 +457,11 @@ export default function DnDSheet() {
           return (
             <div key={key} style={{ display: "flex", alignItems: "center", gap: 9, padding: "4px 0", borderBottom: "1px solid rgba(139,94,26,0.14)" }}>
               <Dot on={s.savingThrows[key].prof} onClick={() => toggleSave(key)} />
-              <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.7rem", fontWeight: 700, color: "#3d2b0a", minWidth: 30 }}>{fmtMod(mod)}</span>
-              <span style={{ fontSize: "0.85rem", color: PALETTE.ink, textTransform: "capitalize" }}>{key.replace(/([A-Z])/g, ' $1')}</span>
+              <div onClick={() => rollCheck(mod, `${key.replace(/([A-Z])/g, ' $1')} save`)}
+                style={{ display: "flex", alignItems: "center", gap: 9, flex: 1, cursor: "pointer" }}>
+                <span style={styles.rollMod}>{fmtMod(mod)}</span>
+                <span style={{ fontSize: "0.85rem", color: PALETTE.ink, textTransform: "capitalize" }}>{key.replace(/([A-Z])/g, ' $1')}</span>
+              </div>
             </div>
           );
         })}
@@ -504,9 +515,12 @@ export default function DnDSheet() {
           return (
             <div key={key} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", borderBottom: "1px solid rgba(139,94,26,0.14)" }}>
               <Dot on={sk.prof} onClick={() => toggleSkill(key)} />
-              <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.7rem", fontWeight: 700, color: "#3d2b0a", minWidth: 30 }}>{fmtMod(mod)}</span>
-              <span style={{ fontSize: "0.85rem", color: PALETTE.ink, flex: 1 }}>{SKILL_LABELS[key]}</span>
-              <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", color: PALETTE.inkSoft }}>{ABILITY_SHORT[sk.ability]}</span>
+              <div onClick={() => rollCheck(mod, SKILL_LABELS[key])}
+                style={{ display: "flex", alignItems: "center", gap: 9, flex: 1, cursor: "pointer" }}>
+                <span style={styles.rollMod}>{fmtMod(mod)}</span>
+                <span style={{ fontSize: "0.85rem", color: PALETTE.ink, flex: 1 }}>{SKILL_LABELS[key]}</span>
+                <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", color: PALETTE.inkSoft }}>{ABILITY_SHORT[sk.ability]}</span>
+              </div>
             </div>
           );
         })}
@@ -529,6 +543,10 @@ export default function DnDSheet() {
                 style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.3rem", color: PALETTE.goldLt, textAlign: "center", display: "block" }} inputStyle={{ width: 44, textAlign: "center" }} />
             </div>
             <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 1.5, color: PALETTE.inkSoft, textTransform: "uppercase" }}>{label}</span>
+            {key === "initiative" ? (
+              <button title="Roll initiative" style={{ ...styles.smallBtn, display: "block", margin: "5px auto 0", padding: "3px 8px" }}
+                onClick={() => rollCheck(Number(s.combat.initiative) || 0, "Initiative")}>Roll</button>
+            ) : null}
           </div>
         ))}
       </div>
@@ -566,10 +584,18 @@ export default function DnDSheet() {
       <div style={{ ...styles.card, display: "flex", alignItems: "center", gap: 12 }}>
         <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.inkSoft, textTransform: "uppercase" }}>Hit Dice</span>
         <EditField value={s.combat.hitDice} onChange={v => setCombat("hitDice", v)} style={{ fontFamily: "Cinzel,serif", fontSize: "0.95rem", fontWeight: 700, color: "#3d2b0a" }} />
+        <button title="Spend one hit die" style={{ ...styles.smallBtn, marginLeft: "auto" }}
+          onClick={() => {
+            // Spending one hit die on a short rest: a single die of that size + CON.
+            const con = getMod(s.abilities.constitution);
+            const die = (/d(\d+)/.exec(s.combat.hitDice || "") || [, "8"])[1];
+            rollFor(`1d${die}${con >= 0 ? "+" : "-"}${Math.abs(con)}`, "Hit die");
+          }}>Roll one</button>
       </div>
 
       <SectionTitle>Death Saves</SectionTitle>
-      <div style={{ ...styles.card, display: "flex", gap: 24, justifyContent: "center" }}>
+      <div style={{ ...styles.card, display: "flex", gap: 24, justifyContent: "center", alignItems: "center" }}>
+        <button title="Roll a death save" style={styles.smallBtn} onClick={() => rollCheck(0, "Death save")}>Roll Save</button>
         {[["successes", PALETTE.green, "Successes"], ["failures", PALETTE.rust, "Failures"]].map(([type, color, label]) => (
           <div key={type} style={{ textAlign: "center" }}>
             <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 2, color: PALETTE.inkSoft, marginBottom: 7 }}>{label.toUpperCase()}</div>
@@ -699,6 +725,7 @@ export default function DnDSheet() {
         {tab === "codex" && <CodexTab styles={styles} setLore={setLore} update={update} SectionTitle={SectionTitle} />}
         {tab === "maps" && <MapsTab styles={styles} SectionTitle={SectionTitle} />}
         {tab === "paper" && <PhotoTab styles={styles} SectionTitle={SectionTitle} />}
+        <DiceTray ref={diceRef} styles={styles} />
       </div>
 
       {levelUpOpen && <LevelUpModal char={s} styles={styles} onApply={applyLevelUp} onClose={() => setLevelUpOpen(false)} />}
