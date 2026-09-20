@@ -26,7 +26,7 @@ const INITIAL_CHARACTER = {
   },
   combat: {
     ac: 12, initiative: 1, speed: 30,
-    hp: 42, maxHp: 42, tempHp: 0, hitDice: "4d8",
+    hp: 42, maxHp: 42, tempHp: 0, hitDice: "4d8", hitDiceUsed: 0,
   },
   deathSaves: { successes: 0, failures: 0 },
   savingThrows: {
@@ -91,6 +91,10 @@ const getMod = (score) => Math.floor((score - 10) / 2);
 const fmtMod = (n) => (n >= 0 ? `+${n}` : `${n}`);
 const pbFromLevel = (lvl) => 2 + Math.floor((Math.max(1, lvl) - 1) / 4);
 const dieAvg = (size) => Math.floor(size / 2) + 1;
+const parseHitDice = (str) => {
+  const m = /(\d+)?d(\d+)/i.exec(String(str || ""));
+  return { total: m && m[1] ? Number(m[1]) : 1, size: m ? Number(m[2]) : 8 };
+};
 
 // Merge a stored character with the initial shape so new fields always exist.
 function hydrate(stored) {
@@ -334,6 +338,45 @@ export default function DnDSheet() {
   const setCombat = (key, val) => update(c => ({ ...c, combat: { ...c.combat, [key]: val } }));
   const toggleSave = (key) => update(c => ({ ...c, savingThrows: { ...c.savingThrows, [key]: { ...c.savingThrows[key], prof: !c.savingThrows[key].prof } } }));
   const toggleSkill = (key) => update(c => ({ ...c, skills: { ...c.skills, [key]: { ...c.skills[key], prof: !c.skills[key].prof } } }));
+  // ── Rests ──
+  // Short: Pact Magic slots return. HP does not - you heal by deliberately
+  // spending hit dice, which is its own action below.
+  const shortRest = () => update(c => ({ ...c, spellSlots: { ...c.spellSlots, used: 0 } }));
+
+  // Long: full HP, temp HP gone, all slots back, half your hit dice back
+  // (minimum one), death saves cleared.
+  const longRest = () => update(c => {
+    const { total } = parseHitDice(c.combat.hitDice);
+    const regained = Math.max(1, Math.floor(total / 2));
+    return {
+      ...c,
+      combat: {
+        ...c.combat,
+        hp: c.combat.maxHp,
+        tempHp: 0,
+        hitDiceUsed: Math.max(0, (c.combat.hitDiceUsed || 0) - regained),
+      },
+      spellSlots: { ...c.spellSlots, used: 0 },
+      deathSaves: { successes: 0, failures: 0 },
+    };
+  });
+
+  // Spend one hit die: roll it, heal by the result, and mark the die used.
+  const spendHitDie = () => {
+    const { size } = parseHitDice(char.combat.hitDice);
+    const con = getMod(char.abilities.constitution);
+    const r = rollFor(`1d${size}${con >= 0 ? "+" : "-"}${Math.abs(con)}`, "Hit die");
+    const healed = Math.max(0, r?.total ?? 0);
+    update(c => ({
+      ...c,
+      combat: {
+        ...c.combat,
+        hp: Math.min(c.combat.maxHp, c.combat.hp + healed),
+        hitDiceUsed: (c.combat.hitDiceUsed || 0) + 1,
+      },
+    }));
+  };
+
   const toggleDS = (type) => update(c => { const cur = c.deathSaves[type]; return { ...c, deathSaves: { ...c.deathSaves, [type]: cur >= 3 ? 0 : cur + 1 } }; });
   const setLore = (name, text) => update(c => ({ ...c, lore: { ...c.lore, [name]: text } }));
 
@@ -545,7 +588,12 @@ export default function DnDSheet() {
   );
 
   // ── COMBAT ──
-  const combatTab = () => (
+  const combatTab = () => {
+    const hd = parseHitDice(s.combat.hitDice);
+    const hdUsed = Math.min(s.combat.hitDiceUsed || 0, hd.total);
+    const hdLeft = hd.total - hdUsed;
+    const con = getMod(s.abilities.constitution);
+    return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 14 }}>
         {[{ label: "Armor Class", key: "ac" }, { label: "Initiative", key: "initiative" }, { label: "Speed", key: "speed" }].map(({ label, key }) => (
@@ -593,16 +641,52 @@ export default function DnDSheet() {
         </div>
       </div>
 
-      <div style={{ ...styles.card, display: "flex", alignItems: "center", gap: 12 }}>
-        <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.inkSoft, textTransform: "uppercase" }}>Hit Dice</span>
-        <EditField value={s.combat.hitDice} onChange={v => setCombat("hitDice", v)} style={{ fontFamily: "Cinzel,serif", fontSize: "0.95rem", fontWeight: 700, color: "#3d2b0a" }} />
-        <button title="Spend one hit die" style={{ ...styles.smallBtn, marginLeft: "auto" }}
-          onClick={() => {
-            // Spending one hit die on a short rest: a single die of that size + CON.
-            const con = getMod(s.abilities.constitution);
-            const die = (/d(\d+)/.exec(s.combat.hitDice || "") || [, "8"])[1];
-            rollFor(`1d${die}${con >= 0 ? "+" : "-"}${Math.abs(con)}`, "Hit die");
-          }}>Roll one</button>
+      <div style={styles.card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.inkSoft, textTransform: "uppercase" }}>Hit Dice</span>
+          <EditField value={s.combat.hitDice} onChange={v => setCombat("hitDice", v)} style={{ fontFamily: "Cinzel,serif", fontSize: "0.95rem", fontWeight: 700, color: "#3d2b0a" }} />
+          <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.inkSoft, marginLeft: "auto" }}>{hdLeft} of {hd.total} left</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            {Array.from({ length: hd.total }, (_, i) => {
+              const spent = i < hdUsed;
+              return (
+                <div key={i} onClick={() => setCombat("hitDiceUsed", spent ? i : i + 1)}
+                  title={spent ? "Spent — tap to take it back" : "Available — tap to mark spent"}
+                  style={{
+                    width: 20, height: 20, borderRadius: 5, cursor: "pointer", flexShrink: 0,
+                    border: `2px solid ${PALETTE.green}`, transition: "all 0.15s",
+                    background: spent ? "transparent" : PALETTE.green,
+                  }} />
+              );
+            })}
+          </div>
+          <button title={hdLeft === 0 ? "No hit dice left — take a long rest" : `Roll 1d${hd.size} + CON and heal`}
+            disabled={hdLeft === 0}
+            style={{ ...styles.smallBtn, marginLeft: "auto", opacity: hdLeft === 0 ? 0.4 : 1, cursor: hdLeft === 0 ? "not-allowed" : "pointer" }}
+            onClick={spendHitDie}>Spend one</button>
+        </div>
+        <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 7, lineHeight: 1.4 }}>
+          Spending one rolls 1d{hd.size}{con >= 0 ? "+" : "−"}{Math.abs(con)} and heals you by that much. You get half of them back on a long rest.
+        </div>
+      </div>
+
+      <SectionTitle>Rest</SectionTitle>
+      <div style={styles.card}>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button style={{ ...styles.btn, flex: 1 }} onClick={shortRest}>☾ Short Rest</button>
+          <button style={{ ...styles.btn, flex: 1 }}
+            onClick={() => {
+              const { total } = parseHitDice(s.combat.hitDice);
+              const back = Math.max(1, Math.floor(total / 2));
+              if (confirm(`Long rest?\n\n· HP back to ${s.combat.maxHp}\n· Temp HP cleared\n· All Pact Magic slots back\n· ${back} hit ${back === 1 ? "die" : "dice"} back\n· Death saves cleared`)) longRest();
+            }}>☀ Long Rest</button>
+        </div>
+        <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 8, lineHeight: 1.45 }}>
+          <b>Short</b> (1 hour) — all Pact Magic slots return. Heal by spending hit dice above; a short rest does not restore HP on its own.<br />
+          <b>Long</b> (8 hours) — full HP, temp HP gone, all slots back, half your hit dice back, death saves cleared.
+        </div>
       </div>
 
       <SectionTitle>Death Saves</SectionTitle>
@@ -620,7 +704,8 @@ export default function DnDSheet() {
         ))}
       </div>
     </div>
-  );
+    );
+  };
 
   // ── SPELLS ──
   const spellsTab = () => {
@@ -680,7 +765,7 @@ export default function DnDSheet() {
             </div>
             <button style={{ ...styles.smallBtn, marginLeft: "auto" }} disabled={used === 0}
               title="Pact Magic slots return on a short or long rest"
-              onClick={() => setUsed(0)}>Short Rest</button>
+              onClick={shortRest}>Short Rest</button>
           </div>
           <div style={{ fontSize: "0.73rem", color: PALETTE.inkSoft, marginTop: 7, lineHeight: 1.45 }}>
             Every slot is <b>{ordinal(slotLevel)} level</b> — a warlock has no lower ones, so anything you cast is
