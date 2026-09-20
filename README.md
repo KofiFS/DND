@@ -13,6 +13,10 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
   features, traits, gear, conditions and magic items. Read what they do and add
   them to your sheet in one tap. The rules text is saved with the entry, so you can
   re-read it later (even offline) via the **Info** button next to it.
+- **Spell slots** — The Spells tab tracks Pact Magic: tap **Cast** on a spell to
+  spend a slot, or tap the pips directly. Cantrips are free and marked *at will*.
+  **Short Rest** brings every slot back. The number of slots and their level come
+  from the warlock table for your level; type over the count to override it.
 - **Dice** — A d20 button on every tab opens the dice tray: d4 through d100, a
   count and bonus stepper, advantage/disadvantage, and any expression you type
   (`2d6+3`, `1d8+1d6`). Natural 20s and 1s are called out, and the last 30 rolls

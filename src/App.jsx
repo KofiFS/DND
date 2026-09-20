@@ -63,6 +63,7 @@ const INITIAL_CHARACTER = {
   ],
   proficiencies: "Thieves' Tools, Simple Weapons, Light Armor",
   spellcasting: { ability: "CHA", saveDC: 12, attackBonus: 4 },
+  spellSlots: { used: 0, maxOverride: null },
   spells: {
     cantrips: ["Minor Illusion", "Thunderclap", "Eldritch Blast"],
     level1: ["Charm Person", "Unseen Servant", "Illusory Script", "Sleep", "Faerie Fire", "Hex"],
@@ -104,6 +105,7 @@ function hydrate(stored) {
     savingThrows: { ...INITIAL_CHARACTER.savingThrows, ...stored.savingThrows },
     skills: { ...INITIAL_CHARACTER.skills, ...stored.skills },
     spellcasting: { ...INITIAL_CHARACTER.spellcasting, ...stored.spellcasting },
+    spellSlots: { ...INITIAL_CHARACTER.spellSlots, ...stored.spellSlots },
     spells: { ...INITIAL_CHARACTER.spells, ...stored.spells },
     lore: { ...(stored.lore || {}) },
   };
@@ -183,7 +185,7 @@ function AbilityBlock({ name, score, onChange, onRoll }) {
 }
 
 // ── Entry row with expandable, editable, fetchable description ──
-function EntryRow({ name, icon, desc, onSetDesc, onRemove, styles }) {
+function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled, styles }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -209,6 +211,16 @@ function EntryRow({ name, icon, desc, onSetDesc, onRemove, styles }) {
         <span style={{ flex: 1, fontSize: "0.92rem", color: PALETTE.ink }}>{name}</span>
         {hasDesc && <span title="Has a description" style={{ width: 6, height: 6, borderRadius: "50%", background: PALETTE.green, flexShrink: 0 }} />}
         <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+        {onCast && (
+          <button
+            title={castDisabled ? "No Pact Magic slots left — take a short rest" : `Cast ${name} and spend a slot`}
+            disabled={castDisabled}
+            onClick={(e) => { e.stopPropagation(); onCast(); }}
+            style={{
+              ...styles.smallBtn, padding: "3px 8px", flexShrink: 0,
+              opacity: castDisabled ? 0.4 : 1, cursor: castDisabled ? "not-allowed" : "pointer",
+            }}>Cast</button>
+        )}
         {onRemove && <button style={styles.removeBtn} onClick={(e) => { e.stopPropagation(); onRemove(); }}>×</button>}
       </div>
       {open && (
@@ -613,6 +625,14 @@ export default function DnDSheet() {
   // ── SPELLS ──
   const spellsTab = () => {
     const levelLabels = { cantrips: "Cantrips", level1: "1st Level", level2: "2nd Level", level3: "3rd Level", level4: "4th Level", level5: "5th Level" };
+    // Pact Magic: every slot is the same level, and they come back on a short rest.
+    const tableRow = rowFor(s.level);
+    const slotMax = s.spellSlots.maxOverride ?? tableRow.slots;
+    const slotLevel = tableRow.slotLevel;
+    const used = Math.min(s.spellSlots.used, slotMax);
+    const open_ = slotMax - used;
+    const setUsed = (n) => update(c => ({ ...c, spellSlots: { ...c.spellSlots, used: Math.min(Math.max(0, n), c.spellSlots.maxOverride ?? rowFor(c.level).slots) } }));
+    const ordinal = (n) => `${n}${["st", "nd", "rd"][n - 1] || "th"}`;
     const addSpell = (lvl, name) => {
       update(c => c.spells[lvl].includes(name) ? c : ({ ...c, spells: { ...c.spells, [lvl]: [...c.spells[lvl], name] } }));
       // Auto-fetch a description in the background for newly added spells.
@@ -633,17 +653,54 @@ export default function DnDSheet() {
           ))}
         </div>
 
+        <div style={{ ...styles.card, marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+            <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", letterSpacing: 2, textTransform: "uppercase", color: PALETTE.rust }}>Pact Magic Slots</span>
+            <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", color: PALETTE.inkSoft, marginLeft: "auto" }}>
+              {open_} of <EditField value={slotMax} type="number" style={{ color: PALETTE.inkSoft }} inputStyle={{ width: 30, textAlign: "center" }}
+                onChange={v => update(c => ({ ...c, spellSlots: { ...c.spellSlots, maxOverride: Math.max(0, Number(v) || 0) } }))} /> left
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 7 }}>
+              {Array.from({ length: slotMax }, (_, i) => {
+                const spent = i < used;
+                return (
+                  <div key={i} onClick={() => setUsed(spent ? i : i + 1)}
+                    title={spent ? "Spent — tap to take it back" : "Available — tap to spend"}
+                    style={{
+                      width: 24, height: 24, borderRadius: "50%", cursor: "pointer", flexShrink: 0,
+                      border: `2px solid ${PALETTE.rust}`, transition: "all 0.15s",
+                      background: spent ? "transparent" : PALETTE.rust,
+                      boxShadow: spent ? "none" : "0 1px 4px rgba(122,28,28,0.4)",
+                    }} />
+                );
+              })}
+              {slotMax === 0 ? <span style={{ fontSize: "0.82rem", color: PALETTE.inkSoft }}>No slots at this level.</span> : null}
+            </div>
+            <button style={{ ...styles.smallBtn, marginLeft: "auto" }} disabled={used === 0}
+              title="Pact Magic slots return on a short or long rest"
+              onClick={() => setUsed(0)}>Short Rest</button>
+          </div>
+          <div style={{ fontSize: "0.73rem", color: PALETTE.inkSoft, marginTop: 7, lineHeight: 1.45 }}>
+            Every slot is <b>{ordinal(slotLevel)} level</b> — a warlock has no lower ones, so anything you cast is
+            cast at {ordinal(slotLevel)}. They all come back on a <b>short rest</b>.
+          </div>
+        </div>
+
         <button style={{ ...styles.addBtn, background: "transparent", color: PALETTE.rust, borderColor: PALETTE.rust, marginTop: 0, marginBottom: 8, width: "100%" }} onClick={() => setTab("codex")}>🔍 Look up a spell in the Codex</button>
 
         {Object.entries(s.spells).map(([lvl, spells]) => (
           <div key={lvl} style={{ border: "1px solid rgba(201,136,42,0.3)", borderRadius: 12, overflow: "hidden", marginBottom: 10 }}>
             <div style={{ background: `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})`, padding: "7px 13px", fontFamily: "Cinzel,serif", fontSize: "0.62rem", letterSpacing: 2, color: PALETTE.goldLt, textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
-              <span>{levelLabels[lvl]}</span><span style={{ color: "#c9882aaa" }}>{spells.length}</span>
+              <span>{levelLabels[lvl]}{lvl === "cantrips" ? " · at will" : ""}</span><span style={{ color: "#c9882aaa" }}>{spells.length}</span>
             </div>
             <div style={{ padding: "4px 13px 8px", background: "rgba(255,250,240,0.5)" }}>
               {spells.map((spell, i) => (
                 <EntryRow key={i} name={spell} icon="✷" desc={s.lore[spell]} styles={styles}
                   onSetDesc={(t) => setLore(spell, t)}
+                  onCast={lvl === "cantrips" ? null : () => setUsed(used + 1)}
+                  castDisabled={open_ === 0}
                   onRemove={() => update(c => ({ ...c, spells: { ...c.spells, [lvl]: c.spells[lvl].filter((_, j) => j !== i) } }))} />
               ))}
               {addingSpell === lvl ? (
