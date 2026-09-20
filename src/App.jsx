@@ -5,6 +5,8 @@ import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText
 import { PALETTE } from "./theme.js";
 import MapsTab from "./MapsTab.jsx";
 import DiceTray from "./DiceTray.jsx";
+import { parseExpr, doubleDice } from "./dice.js";
+import { isConcentration, detectRecharge } from "./rules.js";
 
 const STORAGE_KEY = "dnd-sheet-v1";
 
@@ -64,6 +66,13 @@ const INITIAL_CHARACTER = {
   proficiencies: "Thieves' Tools, Simple Weapons, Light Armor",
   spellcasting: { ability: "CHA", saveDC: 12, attackBonus: 4 },
   spellSlots: { used: 0, maxOverride: null },
+  // feature name -> { used, max, recharge: "short" | "long" }
+  featureUses: {},
+  // the one spell you are concentrating on, or null
+  concentration: null,
+  attacks: [
+    { id: "eldritch-blast", name: "Eldritch Blast", bonus: 4, damage: "1d10+2" },
+  ],
   spells: {
     cantrips: ["Minor Illusion", "Thunderclap", "Eldritch Blast"],
     level1: ["Charm Person", "Unseen Servant", "Illusory Script", "Sleep", "Faerie Fire", "Hex"],
@@ -110,6 +119,8 @@ function hydrate(stored) {
     skills: { ...INITIAL_CHARACTER.skills, ...stored.skills },
     spellcasting: { ...INITIAL_CHARACTER.spellcasting, ...stored.spellcasting },
     spellSlots: { ...INITIAL_CHARACTER.spellSlots, ...stored.spellSlots },
+    featureUses: { ...(stored.featureUses || {}) },
+    attacks: stored.attacks || INITIAL_CHARACTER.attacks,
     spells: { ...INITIAL_CHARACTER.spells, ...stored.spells },
     lore: { ...(stored.lore || {}) },
   };
@@ -142,7 +153,7 @@ function migrate(c) {
 }
 
 // ── Inline editable field ──
-function EditField({ value, onChange, style = {}, inputStyle = {}, multiline = false, type = "text" }) {
+function EditField({ value, onChange, style = {}, inputStyle = {}, multiline = false, type = "text", display }) {
   const [editing, setEditing] = useState(false);
   const [local, setLocal] = useState(value);
   useEffect(() => { setLocal(value); }, [value]);
@@ -163,7 +174,7 @@ function EditField({ value, onChange, style = {}, inputStyle = {}, multiline = f
   return (
     <span onClick={() => setEditing(true)}
       style={{ cursor: "text", borderBottom: "1px dashed rgba(201,136,42,0.4)", display: "inline-block", ...style }}
-      title="Tap to edit">{value}</span>
+      title="Tap to edit">{display ? display(value) : value}</span>
   );
 }
 
@@ -189,7 +200,7 @@ function AbilityBlock({ name, score, onChange, onRoll }) {
 }
 
 // ── Entry row with expandable, editable, fetchable description ──
-function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled, styles }) {
+function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled, uses, styles }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -215,6 +226,27 @@ function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled,
         <span style={{ flex: 1, fontSize: "0.92rem", color: PALETTE.ink }}>{name}</span>
         {hasDesc && <span title="Has a description" style={{ width: 6, height: 6, borderRadius: "50%", background: PALETTE.green, flexShrink: 0 }} />}
         <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+        {uses && uses.max > 0 && (
+          <span style={{ display: "flex", gap: 3, flexShrink: 0 }} title={`${uses.max - uses.used} of ${uses.max} left · recharges on a ${uses.recharge} rest`}>
+            {Array.from({ length: Math.min(uses.max, 6) }, (_, i) => (
+              <span key={i} style={{
+                width: 9, height: 9, borderRadius: "50%", display: "inline-block",
+                border: `1.5px solid ${PALETTE.gold}`,
+                background: i < uses.used ? "transparent" : PALETTE.gold,
+              }} />
+            ))}
+          </span>
+        )}
+        {uses && uses.max > 0 && (
+          <button
+            title={uses.used >= uses.max ? `Spent — recharges on a ${uses.recharge} rest` : `Use ${name}`}
+            disabled={uses.used >= uses.max}
+            onClick={(e) => { e.stopPropagation(); uses.onUse(); }}
+            style={{
+              ...styles.smallBtn, padding: "3px 7px", flexShrink: 0,
+              opacity: uses.used >= uses.max ? 0.4 : 1, cursor: uses.used >= uses.max ? "not-allowed" : "pointer",
+            }}>Use</button>
+        )}
         {onCast && (
           <button
             title={castDisabled ? "No Pact Magic slots left — take a short rest" : `Cast ${name} and spend a slot`}
@@ -238,6 +270,34 @@ function EntryRow({ name, icon, desc, onSetDesc, onRemove, onCast, castDisabled,
             </button>
             {err && <span style={{ color: PALETTE.rust, fontSize: "0.72rem" }}>{err}</span>}
           </div>
+          {uses && (
+            <div style={{ display: "flex", gap: 7, alignItems: "center", marginTop: 8, flexWrap: "wrap", fontSize: "0.76rem", color: PALETTE.inkSoft }}>
+              {uses.max > 0 ? (
+                <>
+                  <span>Uses</span>
+                  <button style={{ ...styles.smallBtn, padding: "2px 7px" }} onClick={() => uses.onSet(uses.max - 1, uses.recharge)}>−</button>
+                  <b style={{ color: "#3d2b0a" }}>{uses.max}</b>
+                  <button style={{ ...styles.smallBtn, padding: "2px 7px" }} onClick={() => uses.onSet(uses.max + 1, uses.recharge)}>+</button>
+                  <span>per</span>
+                  {["short", "long"].map((r) => (
+                    <button key={r} onClick={() => uses.onSet(uses.max, r)}
+                      style={{
+                        ...styles.smallBtn, padding: "2px 7px",
+                        background: uses.recharge === r ? `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})` : "rgba(61,26,5,0.08)",
+                        color: uses.recharge === r ? PALETTE.goldLt : PALETTE.darkB,
+                      }}>{r}</button>
+                  ))}
+                  <span>rest</span>
+                  <button style={{ ...styles.smallBtn, padding: "2px 7px", marginLeft: "auto" }} onClick={() => uses.onSet(0, uses.recharge)}>Stop tracking</button>
+                </>
+              ) : (
+                <button style={{ ...styles.smallBtn, padding: "3px 9px" }}
+                  onClick={() => uses.onSet(1, detectRecharge(desc))}>
+                  ⊕ Track limited uses
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -301,6 +361,8 @@ export default function DnDSheet() {
   const rollFor = (expr, label) => diceRef.current?.rollFor(expr, label);
   const [saved, setSaved] = useState(false);
   const [addingFeature, setAddingFeature] = useState(false);
+  const [addingAttack, setAddingAttack] = useState(false);
+  const [newAttack, setNewAttack] = useState("");
   const [newFeature, setNewFeature] = useState("");
   const [addingItem, setAddingItem] = useState(false);
   const [newItem, setNewItem] = useState("");
@@ -338,10 +400,52 @@ export default function DnDSheet() {
   const setCombat = (key, val) => update(c => ({ ...c, combat: { ...c.combat, [key]: val } }));
   const toggleSave = (key) => update(c => ({ ...c, savingThrows: { ...c.savingThrows, [key]: { ...c.savingThrows[key], prof: !c.savingThrows[key].prof } } }));
   const toggleSkill = (key) => update(c => ({ ...c, skills: { ...c.skills, [key]: { ...c.skills[key], prof: !c.skills[key].prof } } }));
+  // ── Attacks ──
+  const setAttack = (i, fields) => update(c => ({ ...c, attacks: c.attacks.map((a, j) => j === i ? { ...a, ...fields } : a) }));
+  const addAttack = (name) => update(c => ({ ...c, attacks: [...c.attacks, { id: `${Date.now()}`, name, bonus: 0, damage: "1d6" }] }));
+  const removeAttack = (i) => update(c => ({ ...c, attacks: c.attacks.filter((_, j) => j !== i) }));
+
+  // ── Limited uses ──
+  const usesFor = (name) => char.featureUses?.[name] || { used: 0, max: 0, recharge: "long" };
+  const setUses = (name, max, recharge) => update(c => {
+    const next = { ...(c.featureUses || {}) };
+    if (max <= 0) delete next[name];                       // stop tracking
+    else next[name] = { used: Math.min(next[name]?.used || 0, max), max, recharge };
+    return { ...c, featureUses: next };
+  });
+  const spendUse = (name) => update(c => {
+    const cur = c.featureUses?.[name];
+    if (!cur || cur.used >= cur.max) return c;
+    return { ...c, featureUses: { ...c.featureUses, [name]: { ...cur, used: cur.used + 1 } } };
+  });
+  // Reset every tracked feature whose recharge is covered by this rest.
+  const rechargeUses = (uses, kind) => Object.fromEntries(
+    Object.entries(uses || {}).map(([k, v]) => [k, (kind === "long" || v.recharge === "short") ? { ...v, used: 0 } : v]),
+  );
+  const usesBundle = (name) => {
+    const u = usesFor(name);
+    return { ...u, onUse: () => spendUse(name), onSet: (max, recharge) => setUses(name, max, recharge) };
+  };
+
   // ── Rests ──
   // Short: Pact Magic slots return. HP does not - you heal by deliberately
   // spending hit dice, which is its own action below.
-  const shortRest = () => update(c => ({ ...c, spellSlots: { ...c.spellSlots, used: 0 } }));
+  // Casting spends a slot, and claims concentration when the rules text says the
+  // spell needs it — which silently drops whatever you were concentrating on, as
+  // it does at the table.
+  const castSpell = (name) => update(c => {
+    const max = c.spellSlots.maxOverride ?? rowFor(c.level).slots;
+    if (c.spellSlots.used >= max) return c;
+    const conc = isConcentration(c.lore?.[name]) ? name : c.concentration;
+    return { ...c, spellSlots: { ...c.spellSlots, used: c.spellSlots.used + 1 }, concentration: conc };
+  });
+
+  const shortRest = () => update(c => ({
+    ...c,
+    spellSlots: { ...c.spellSlots, used: 0 },
+    featureUses: rechargeUses(c.featureUses, "short"),
+    concentration: null,
+  }));
 
   // Long: full HP, temp HP gone, all slots back, half your hit dice back
   // (minimum one), death saves cleared.
@@ -357,6 +461,8 @@ export default function DnDSheet() {
         hitDiceUsed: Math.max(0, (c.combat.hitDiceUsed || 0) - regained),
       },
       spellSlots: { ...c.spellSlots, used: 0 },
+      featureUses: rechargeUses(c.featureUses, "long"),
+      concentration: null,
       deathSaves: { successes: 0, failures: 0 },
     };
   });
@@ -527,6 +633,7 @@ export default function DnDSheet() {
         {s.features.map((f, i) => (
           <EntryRow key={i} name={f} icon="✦" desc={s.lore[f]} styles={styles}
             onSetDesc={(t) => setLore(f, t)}
+            uses={usesBundle(f)}
             onRemove={() => update(c => ({ ...c, features: c.features.filter((_, j) => j !== i) }))} />
         ))}
         {addingFeature ? (
@@ -639,6 +746,61 @@ export default function DnDSheet() {
           <EditField value={s.combat.tempHp} onChange={v => setCombat("tempHp", Number(v))} type="number" style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.8rem", color: "#3d2b0a" }} inputStyle={{ width: 50, textAlign: "center" }} />
           <button style={{ ...styles.hpBtn, width: 32, height: 32 }} onClick={() => setCombat("tempHp", s.combat.tempHp + 1)}>+</button>
         </div>
+      </div>
+
+      <SectionTitle>Attacks</SectionTitle>
+      <div style={styles.card}>
+        {s.attacks.length === 0 ? (
+          <div style={{ color: PALETTE.inkSoft, fontSize: "0.82rem", padding: "4px 0 8px" }}>
+            Nothing here yet. Add a weapon or an attack spell.
+          </div>
+        ) : null}
+        {s.attacks.map((a, i) => {
+          const dmgOk = !!parseExpr(a.damage);
+          const crit = dmgOk ? doubleDice(a.damage) : null;
+          return (
+            <div key={a.id} style={{ padding: "7px 0", borderBottom: "1px solid rgba(139,94,26,0.14)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <span style={{ color: PALETTE.gold, fontSize: "0.72rem", width: 14, textAlign: "center", flexShrink: 0 }}>⚔</span>
+                <EditField value={a.name} onChange={v => setAttack(i, { name: v })}
+                  style={{ flex: 1, fontSize: "0.92rem", color: PALETTE.ink }} />
+                <button style={styles.removeBtn} onClick={() => removeAttack(i)}>×</button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 5, marginLeft: 21, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 1, color: PALETTE.inkSoft, textTransform: "uppercase" }}>To hit</span>
+                <EditField value={a.bonus} type="number" display={fmtMod}
+                  onChange={v => setAttack(i, { bonus: Number(v) || 0 })}
+                  style={{ fontFamily: "Cinzel,serif", fontSize: "0.85rem", fontWeight: 700, color: "#3d2b0a" }} inputStyle={{ width: 40, textAlign: "center" }} />
+                <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 1, color: PALETTE.inkSoft, textTransform: "uppercase" }}>Dmg</span>
+                <EditField value={a.damage} onChange={v => setAttack(i, { damage: v })}
+                  style={{ fontFamily: "Cinzel,serif", fontSize: "0.85rem", fontWeight: 700, color: dmgOk ? "#3d2b0a" : PALETTE.rust }} inputStyle={{ width: 72 }} />
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 6, marginLeft: 21 }}>
+                <button style={{ ...styles.smallBtn, flex: 1 }} title={`Roll d20${a.bonus >= 0 ? "+" : ""}${a.bonus} to hit`}
+                  onClick={() => rollCheck(a.bonus, `${a.name} to hit`)}>Hit</button>
+                <button style={{ ...styles.smallBtn, flex: 1, opacity: dmgOk ? 1 : 0.4 }} disabled={!dmgOk}
+                  title={dmgOk ? `Roll ${a.damage}` : "Damage is not a dice expression"}
+                  onClick={() => rollFor(a.damage, `${a.name} damage`)}>Damage</button>
+                <button style={{ ...styles.smallBtn, flex: 1, opacity: crit ? 1 : 0.4 }} disabled={!crit}
+                  title={crit ? `Critical hit — roll ${crit}` : "Needs at least one die to crit"}
+                  onClick={() => rollFor(crit, `${a.name} CRIT`)}>Crit</button>
+              </div>
+              {!dmgOk ? (
+                <div style={{ color: PALETTE.rust, fontSize: "0.72rem", marginLeft: 21, marginTop: 4 }}>
+                  Damage should look like 1d10+2 or 2d6.
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+        {addingAttack ? (
+          <AddInline value={newAttack} setValue={setNewAttack} placeholder="Attack name…" styles={styles}
+            onAdd={() => { const v = newAttack.trim(); if (v) { addAttack(v); setNewAttack(""); setAddingAttack(false); } }}
+            onCancel={() => setAddingAttack(false)} />
+        ) : (
+          <button style={{ ...styles.addBtn, fontSize: "0.55rem", padding: "4px 10px" }}
+            onClick={() => { setAddingAttack(true); setNewAttack(""); }}>+ Add</button>
+        )}
       </div>
 
       <div style={styles.card}>
@@ -773,6 +935,22 @@ export default function DnDSheet() {
           </div>
         </div>
 
+        {s.concentration ? (
+          <div style={{ ...styles.card, border: `1.5px solid ${PALETTE.green}`, background: "rgba(61,106,28,0.07)", marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", letterSpacing: 2, textTransform: "uppercase", color: PALETTE.green }}>Concentrating</span>
+              <b style={{ fontSize: "0.92rem", color: PALETTE.ink }}>{s.concentration}</b>
+              <button style={{ ...styles.smallBtn, marginLeft: "auto" }}
+                title="Roll a Constitution save to keep it — DC 10, or half the damage you took, whichever is higher"
+                onClick={() => rollCheck(getSaveMod("constitution"), "Concentration (CON save)")}>CON Save</button>
+              <button style={styles.smallBtn} onClick={() => update(c => ({ ...c, concentration: null }))}>Drop</button>
+            </div>
+            <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 6, lineHeight: 1.4 }}>
+              DC 10 or half the damage taken, whichever is higher. Casting another concentration spell replaces this one.
+            </div>
+          </div>
+        ) : null}
+
         <button style={{ ...styles.addBtn, background: "transparent", color: PALETTE.rust, borderColor: PALETTE.rust, marginTop: 0, marginBottom: 8, width: "100%" }} onClick={() => setTab("codex")}>🔍 Look up a spell in the Codex</button>
 
         {Object.entries(s.spells).map(([lvl, spells]) => (
@@ -784,7 +962,7 @@ export default function DnDSheet() {
               {spells.map((spell, i) => (
                 <EntryRow key={i} name={spell} icon="✷" desc={s.lore[spell]} styles={styles}
                   onSetDesc={(t) => setLore(spell, t)}
-                  onCast={lvl === "cantrips" ? null : () => setUsed(used + 1)}
+                  onCast={lvl === "cantrips" ? null : () => castSpell(spell)}
                   castDisabled={open_ === 0}
                   onRemove={() => update(c => ({ ...c, spells: { ...c.spells, [lvl]: c.spells[lvl].filter((_, j) => j !== i) } }))} />
               ))}

@@ -17,10 +17,19 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
   spend a slot, or tap the pips directly. Cantrips are free and marked *at will*.
   The number of slots and their level come from the warlock table for your level;
   type over the count to override it.
+- **Attacks** — On the Combat tab: name, to-hit and damage per entry, with
+  **Hit**, **Damage** and **Crit** (which doubles the dice, not the bonus).
+- **Limited uses** — Expand any feature and tap *Track limited uses* to give it
+  use pips and a **Use** button. Whether it recharges on a short or long rest is
+  read off its own rules text.
+- **Concentration** — Casting a spell whose description calls for concentration
+  shows a badge on the Spells tab; casting another replaces it. One tap rolls the
+  CON save, and any rest ends it.
 - **Rests** — On the Combat tab. **Short Rest** returns every Pact Magic slot;
   heal by spending hit dice, which roll and add the result to your HP.
   **Long Rest** restores full HP, clears temp HP, returns all slots and half your
-  hit dice (minimum one), and clears death saves.
+  hit dice (minimum one), and clears death saves. Both recharge feature uses —
+  short-rest ones on either, long-rest ones only on a long rest.
 - **Dice** — A d20 button on every tab opens the dice tray: d4 through d100, a
   count and bonus stepper, advantage/disadvantage, and any expression you type
   (`2d6+3`, `1d8+1d6`). Natural 20s and 1s are called out, and the last 30 rolls

@@ -102,6 +102,15 @@ export function rollCheck(mod = 0, mode = "normal", label = "") {
   return rollExpr(expr, mode, label);
 }
 
+// A critical hit doubles the dice you roll, not the flat modifier:
+// "1d10+2" becomes "2d10+2". Returns null if the expression is unparseable.
+export function doubleDice(input) {
+  const parsed = parseExpr(input);
+  if (!parsed || !parsed.terms.length) return null;
+  const terms = parsed.terms.map((t) => ({ ...t, count: Math.min(MAX_COUNT, t.count * 2) }));
+  return formatExpr(terms, parsed.flat).replace(/−/g, "-");
+}
+
 // Every die that was physically rolled, in order, for the "3, 17, 4" readout.
 export function allDice(result) {
   return result.groups.flatMap((g) => g.rolls.map((v) => ({ v, sides: g.sides, sign: g.sign })));
