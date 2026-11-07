@@ -9,7 +9,11 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
 - **Auto-saves** to your browser as you edit (no save button needed).
 - **Multiple characters** — tap the name in the header (or the ⇄ chip) to switch
   between characters, create a new blank one, duplicate, or delete. Each character
-  keeps its own sheet, notes, lore and Paper-tab photos.
+  keeps its own sheet, notes, lore and Paper-tab photos. The picker also offers
+  ready-made characters (the original Warlock and a level 12 Arcane Trickster Rogue).
+- **Class tab** knows the Warlock and Rogue rules (tables, features, patrons/archetypes,
+  Arcane Trickster spellcasting). Put the class name in the class field to activate it.
+- **Expertise** — on the Skills tab, tap a skill's dot twice to double your proficiency bonus.
 - **Tabs:** Stats, Skills, Combat, Spells, Gear, and a **Codex**.
 - **Notes** field for session notes, lore, and reminders.
 - **Codex** — search the official [D&D 5e SRD](https://www.dnd5eapi.co) for spells,

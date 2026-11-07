@@ -3,6 +3,8 @@ import { search as srdSearch, fetchDetail, formatDetail, describe } from "./api.
 import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage, claimOrphanPhotos, deletePhotosFor } from "./idb.js";
 import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText, meetsPrereq } from "./warlock.js";
 import { loadOrMigrateRoster, saveRoster, loadCharacter, saveCharacter, removeCharacter, summarize, newId } from "./roster.js";
+import { ROGUE_TABLE, rogueRowFor, ROGUE_FEATURES, ARCHETYPES, atSpellsFor } from "./rogue.js";
+import { PRESETS } from "./presets.js";
 
 const SHEET_VERSION = 2;
 
@@ -404,7 +406,12 @@ export default function DnDSheet() {
   const setAbility = (key, val) => update(c => ({ ...c, abilities: { ...c.abilities, [key]: val } }));
   const setCombat = (key, val) => update(c => ({ ...c, combat: { ...c.combat, [key]: val } }));
   const toggleSave = (key) => update(c => ({ ...c, savingThrows: { ...c.savingThrows, [key]: { ...c.savingThrows[key], prof: !c.savingThrows[key].prof } } }));
-  const toggleSkill = (key) => update(c => ({ ...c, skills: { ...c.skills, [key]: { ...c.skills[key], prof: !c.skills[key].prof } } }));
+  // Tap cycles: none → proficient → expertise (double proficiency) → none.
+  const toggleSkill = (key) => update(c => {
+    const sk = c.skills[key];
+    const next = !sk.prof ? { prof: true, expertise: false } : !sk.expertise ? { prof: true, expertise: true } : { prof: false, expertise: false };
+    return { ...c, skills: { ...c.skills, [key]: { ...sk, ...next } } };
+  });
   const toggleDS = (type) => update(c => { const cur = c.deathSaves[type]; return { ...c, deathSaves: { ...c.deathSaves, [type]: cur >= 3 ? 0 : cur + 1 } }; });
   const setLore = (name, text) => update(c => ({ ...c, lore: { ...c.lore, [name]: text } }));
 
@@ -458,7 +465,7 @@ export default function DnDSheet() {
   const s = char;
   const pb = s.proficiencyBonus;
   const getSaveMod = (key) => getMod(s.abilities[key]) + (s.savingThrows[key].prof ? pb : 0);
-  const getSkillMod = (key) => { const sk = s.skills[key]; return getMod(s.abilities[sk.ability]) + (sk.prof ? pb : 0); };
+  const getSkillMod = (key) => { const sk = s.skills[key]; return getMod(s.abilities[sk.ability]) + (sk.expertise ? pb * 2 : sk.prof ? pb : 0); };
 
   const styles = {
     app: { minHeight: "100vh", background: "#0f0804", backgroundImage: "radial-gradient(ellipse at top,#1a0a02 0%,#0a0402 100%)", fontFamily: "'Crimson Text',Georgia,serif", color: PALETTE.ink, maxWidth: 480, margin: "0 auto" },
@@ -592,13 +599,16 @@ export default function DnDSheet() {
           const mod = getSkillMod(key); const sk = s.skills[key];
           return (
             <div key={key} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", borderBottom: "1px solid rgba(139,94,26,0.14)" }}>
-              <Dot on={sk.prof} onClick={() => toggleSkill(key)} />
+              <Dot on={sk.prof} expert={sk.expertise} onClick={() => toggleSkill(key)} />
               <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.7rem", fontWeight: 700, color: "#3d2b0a", minWidth: 30 }}>{fmtMod(mod)}</span>
-              <span style={{ fontSize: "0.85rem", color: PALETTE.ink, flex: 1 }}>{SKILL_LABELS[key]}</span>
+              <span style={{ fontSize: "0.85rem", color: PALETTE.ink, flex: 1 }}>{SKILL_LABELS[key]}{sk.expertise && <span title="Expertise" style={{ color: PALETTE.gold, fontSize: "0.7rem", marginLeft: 5 }}>★</span>}</span>
               <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", color: PALETTE.inkSoft }}>{ABILITY_SHORT[sk.ability]}</span>
             </div>
           );
         })}
+      </div>
+      <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 6, lineHeight: 1.45 }}>
+        Tap a dot once for proficiency, twice for <b>★ Expertise</b> (double proficiency bonus), a third time to clear it.
       </div>
       <div style={{ ...styles.card, marginTop: 12, textAlign: "center" }}>
         <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.rust, marginBottom: 4 }}>PASSIVE WISDOM (PERCEPTION)</div>
@@ -799,6 +809,8 @@ export default function DnDSheet() {
         <CharacterPicker styles={styles} activeId={s.id}
           characters={summarize(roster.ids).map(x => x.id === s.id ? { ...x, name: s.name, class: s.class, race: s.race, level: s.level } : x)}
           onSelect={switchTo} onNew={() => addCharacter(blankCharacter())} onImport={() => fileInputRef.current?.click()}
+          presets={[{ key: "warlock4", label: INITIAL_CHARACTER.name, sub: `${INITIAL_CHARACTER.class} · ${INITIAL_CHARACTER.race}`, data: INITIAL_CHARACTER }, ...PRESETS]}
+          onPreset={(data) => addCharacter(hydrate(JSON.parse(JSON.stringify(data))))}
           onDuplicate={duplicateCharacter} onDelete={deleteCharacter} onClose={() => setPickerOpen(false)} />
       )}
     </div>
@@ -806,7 +818,7 @@ export default function DnDSheet() {
 }
 
 // ── Character picker (switch / create / duplicate / delete) ──
-function CharacterPicker({ characters, activeId, onSelect, onNew, onImport, onDuplicate, onDelete, onClose, styles }) {
+function CharacterPicker({ characters, activeId, onSelect, onNew, onImport, onDuplicate, onDelete, onClose, presets = [], onPreset, styles }) {
   const iconBtn = { background: "none", border: `1px solid rgba(201,136,42,0.5)`, borderRadius: 6, color: PALETTE.inkSoft, cursor: "pointer", fontSize: "0.85rem", width: 28, height: 28, lineHeight: 1, flexShrink: 0 };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -841,6 +853,22 @@ function CharacterPicker({ characters, activeId, onSelect, onNew, onImport, onDu
           <button style={{ ...styles.btn, flex: 1 }} onClick={onNew}>+ New Character</button>
           <button style={{ ...styles.btnGhost, flex: 1 }} onClick={onImport}>⬆ Import JSON</button>
         </div>
+        {presets.length > 0 && (
+          <>
+            <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1.5, color: PALETTE.rust, textTransform: "uppercase", margin: "14px 0 6px" }}>Ready-made characters</div>
+            {presets.map(p => (
+              <button key={p.key} onClick={() => onPreset(p.data)}
+                style={{ ...styles.card, width: "100%", textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", marginBottom: 6, fontFamily: "inherit" }}>
+                <span style={{ color: PALETTE.gold }}>✚</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontFamily: "Cinzel,serif", fontWeight: 700, fontSize: "0.85rem", color: PALETTE.ink }}>{p.label}</span>
+                  <span style={{ display: "block", fontFamily: "Cinzel,serif", fontSize: "0.56rem", letterSpacing: 1, color: PALETTE.inkSoft, marginTop: 2 }}>{p.sub}</span>
+                </span>
+                <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.inkSoft }}>ADD</span>
+              </button>
+            ))}
+          </>
+        )}
         <button style={{ ...styles.btnGhost, width: "100%", marginTop: 8, borderColor: "rgba(92,68,34,0.5)", color: PALETTE.inkSoft }} onClick={onClose}>Close</button>
       </div>
     </div>
@@ -848,13 +876,13 @@ function CharacterPicker({ characters, activeId, onSelect, onNew, onImport, onDu
 }
 
 // ── Small shared bits ──
-function Dot({ on, onClick }) {
+function Dot({ on, expert = false, onClick }) {
   return (
     <div onClick={onClick} style={{
       width: 13, height: 13, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
       background: on ? "radial-gradient(circle at 35% 35%,#e8b84b,#c9882a)" : "#e8d4a8",
       border: `1.5px solid ${on ? "#c9882a" : "#8b5e1a"}`,
-      boxShadow: on ? "0 0 6px rgba(201,136,42,0.5)" : "none",
+      boxShadow: expert ? "0 0 0 2px #f5ead6, 0 0 0 3.5px #c9882a" : on ? "0 0 6px rgba(201,136,42,0.5)" : "none",
     }} />
   );
 }
@@ -871,8 +899,156 @@ function AddInline({ value, setValue, onAdd, onCancel, placeholder, styles }) {
   );
 }
 
-// ── CLASS (Warlock rules at your level) ──
-function ClassTab({ char, update, setLore, styles, SectionTitle }) {
+// ── CLASS tab: picks the rules module from the class name ──
+function ClassTab(props) {
+  const cls = (props.char.class || "").toLowerCase();
+  if (/rogue|thief|assassin|trickster/.test(cls)) return <RogueClassTab {...props} />;
+  if (/warlock/.test(cls)) return <WarlockClassTab {...props} />;
+  return (
+    <div>
+      <props.SectionTitle>Class Rules</props.SectionTitle>
+      <div style={{ ...props.styles.card, fontSize: "0.86rem", color: PALETTE.inkSoft, lineHeight: 1.5 }}>
+        This tab knows the rules for <b>Warlock</b> and <b>Rogue</b>. Put one of those words in the class field on the Stats tab
+        (for example “Rogue 5” or “Arcane Trickster Rogue 12”) to see your features, tables and archetype here.
+        For other classes, use the Codex to look up features and add them to your sheet.
+      </div>
+    </div>
+  );
+}
+
+// Shared bits for the class tabs.
+function ClassStat({ label, value, sub, warn }) {
+  return (
+    <div style={{ flex: 1, textAlign: "center", border: `1px solid ${warn ? PALETTE.rust : "rgba(201,136,42,0.4)"}`, borderRadius: 10, padding: "8px 4px", background: warn ? "rgba(122,28,28,0.06)" : "rgba(201,136,42,0.06)" }}>
+      <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>{value}</div>
+      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.48rem", letterSpacing: 1.5, color: PALETTE.inkSoft, textTransform: "uppercase", marginTop: 2 }}>{label}</div>
+      {sub && <div style={{ fontSize: "0.68rem", color: warn ? PALETTE.rust : PALETTE.inkSoft, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ClassFeatureRow({ f, gained, onSheet, onAdd, styles }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ borderBottom: "1px solid rgba(139,94,26,0.14)", opacity: gained ? 1 : 0.55 }}>
+      <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0", cursor: "pointer" }}>
+        <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.gold, width: 26, flexShrink: 0 }}>L{f.level}</span>
+        <span style={{ flex: 1, fontSize: "0.9rem", color: PALETTE.ink }}>{f.name}</span>
+        {gained && (onSheet
+          ? <span style={{ fontSize: "0.62rem", color: PALETTE.green, fontFamily: "Cinzel,serif" }}>✓ on sheet</span>
+          : <button style={{ ...styles.smallBtn, padding: "3px 8px" }} onClick={(e) => { e.stopPropagation(); onAdd(); }}>+ Add</button>)}
+        <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open && <div style={{ padding: "0 0 10px 35px", fontSize: "0.82rem", color: "#3d2b0a", lineHeight: 1.5 }}>{f.desc}</div>}
+    </div>
+  );
+}
+
+// A sheet feature counts as "on sheet" if it matches the rule name, ignoring a
+// trailing qualifier such as "Sneak Attack (6d6)".
+const featureOnSheet = (features, name) => features.some((f) => f === name || f.replace(/\s*\(.*\)\s*$/, "") === name);
+
+// ── CLASS: Rogue ──
+function RogueClassTab({ char, update, styles, SectionTitle }) {
+  const level = char.level || 1;
+  const row = rogueRowFor(level);
+  const archetype = ARCHETYPES[char.archetype] ? char.archetype : "";
+  const adata = archetype ? ARCHETYPES[archetype] : null;
+  const at = archetype === "Arcane Trickster" ? atSpellsFor(level) : null;
+  const [showAll, setShowAll] = useState(false);
+
+  const cantripsKnown = char.spells.cantrips.length;
+  const spellsKnown = Object.entries(char.spells).filter(([k]) => k !== "cantrips").reduce((n, [, arr]) => n + arr.length, 0);
+  const hasFeature = (name) => featureOnSheet(char.features, name);
+  const addFeature = (name, desc) => update((c) => ({
+    ...c,
+    features: featureOnSheet(c.features, name) ? c.features : [...c.features, name],
+    lore: { ...c.lore, [name]: c.lore[name] || desc },
+  }));
+  const FeatureRow = ({ f, gained }) => <ClassFeatureRow f={f} gained={gained} onSheet={hasFeature(f.name)} onAdd={() => addFeature(f.name, f.desc)} styles={styles} />;
+  const ordinal = (n) => `${n}${["st", "nd", "rd"][n - 1] || "th"}`;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>Rogue {level}</div>
+        <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.62rem", color: PALETTE.inkSoft }}>
+          Archetype:{" "}
+          <select value={archetype} onChange={(e) => update((c) => ({ ...c, archetype: e.target.value }))}
+            style={{ fontFamily: "inherit", fontSize: "0.7rem", background: "rgba(201,136,42,0.1)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.ink, padding: "2px 4px" }}>
+            <option value="">— (from 3rd level)</option>
+            {Object.keys(ARCHETYPES).map((a) => <option key={a}>{a}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <SectionTitle>At Your Level</SectionTitle>
+      <div style={{ display: "flex", gap: 6 }}>
+        <ClassStat label="Sneak Attack" value={`${row.sneak}d6`} sub="once per turn" />
+        <ClassStat label="Prof Bonus" value={`+${row.pb}`} sub={char.proficiencyBonus !== row.pb ? `sheet says +${char.proficiencyBonus}` : "matches sheet"} warn={char.proficiencyBonus !== row.pb} />
+        <ClassStat label="Expertise" value={level >= 6 ? 4 : 2} sub={`have ${Object.values(char.skills).filter((k) => k.expertise).length} skills`} />
+      </div>
+      {at && (
+        <>
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <ClassStat label="Cantrips" value={at.cantrips} sub={`have ${cantripsKnown}`} warn={cantripsKnown < at.cantrips} />
+            <ClassStat label="Spells Known" value={at.spellsKnown} sub={`have ${spellsKnown}`} warn={spellsKnown !== at.spellsKnown} />
+            <ClassStat label="Spell Slots" value={at.slots.join(" / ")} sub={at.slots.map((_, i) => ordinal(i + 1)).join(" / ")} />
+          </div>
+          <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 6, lineHeight: 1.45 }}>
+            Wizard spells, Intelligence-based. Slots return on a <b>long</b> rest. Racial cantrips (e.g. High Elf) count on top of the table. Red boxes mean your sheet doesn't match the table for level {level}.
+          </div>
+        </>
+      )}
+
+      <SectionTitle>Class Features</SectionTitle>
+      <div style={styles.card}>
+        {ROGUE_FEATURES.filter((f) => showAll || f.level <= level).map((f) => <FeatureRow key={f.name} f={f} gained={f.level <= level} />)}
+        <button style={{ ...styles.smallBtn, marginTop: 8 }} onClick={() => setShowAll((v) => !v)}>{showAll ? "Hide future levels" : "Show future levels"}</button>
+      </div>
+
+      {adata && (
+        <>
+          <SectionTitle>{archetype}</SectionTitle>
+          <div style={styles.card}>
+            <div style={{ fontSize: "0.8rem", color: PALETTE.inkSoft, lineHeight: 1.45, marginBottom: 6 }}>{adata.blurb}</div>
+            {adata.features.filter((f) => showAll || f.level <= level).map((f) => <FeatureRow key={f.name} f={f} gained={f.level <= level} />)}
+          </div>
+        </>
+      )}
+
+      <SectionTitle>Rogue Table</SectionTitle>
+      <div style={{ ...styles.card, padding: "6px 8px", overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.74rem", fontFamily: "Cinzel,serif" }}>
+          <thead>
+            <tr style={{ color: PALETTE.rust, fontSize: "0.55rem", letterSpacing: 1 }}>
+              <th style={{ textAlign: "left", padding: "4px 2px" }}>LV</th><th style={{ padding: "4px 2px" }}>PB</th><th style={{ padding: "4px 2px" }}>SNEAK</th>
+              {at && <><th style={{ padding: "4px 2px" }}>CANT</th><th style={{ padding: "4px 2px" }}>SPELLS</th><th style={{ padding: "4px 2px" }}>SLOTS</th></>}
+              <th style={{ textAlign: "left", padding: "4px 2px" }}>FEATURES</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ROGUE_TABLE.map((r) => {
+              const sp = archetype === "Arcane Trickster" ? atSpellsFor(r.level) : null;
+              const names = [...ROGUE_FEATURES.filter((f) => f.level === r.level).map((f) => f.name), ...(adata ? adata.features.filter((f) => f.level === r.level).map((f) => f.name) : [])];
+              return (
+                <tr key={r.level} style={{ background: r.level === level ? "rgba(201,136,42,0.18)" : "transparent", color: r.level <= level ? PALETTE.ink : PALETTE.inkSoft, textAlign: "center" }}>
+                  <td style={{ textAlign: "left", padding: "3px 2px", fontWeight: r.level === level ? 700 : 400 }}>{r.level}</td>
+                  <td style={{ padding: "3px 2px" }}>+{r.pb}</td><td style={{ padding: "3px 2px" }}>{r.sneak}d6</td>
+                  {at && <><td style={{ padding: "3px 2px" }}>{sp ? sp.cantrips : "—"}</td><td style={{ padding: "3px 2px" }}>{sp ? sp.spellsKnown : "—"}</td><td style={{ padding: "3px 2px", whiteSpace: "nowrap" }}>{sp ? sp.slots.join("/") : "—"}</td></>}
+                  <td style={{ textAlign: "left", padding: "3px 2px", fontFamily: "'Crimson Text',serif", fontSize: "0.78rem" }}>{names.join(", ")}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── CLASS: Warlock ──
+function WarlockClassTab({ char, update, setLore, styles, SectionTitle }) {
   const level = char.level || 1;
   const row = rowFor(level);
   const patron = PATRONS[char.patron] ? char.patron : "Archfey";
@@ -900,30 +1076,8 @@ function ClassTab({ char, update, setLore, styles, SectionTitle }) {
     return bucket.includes(name) ? c : { ...c, spells: { ...c.spells, [key]: [...bucket, name] } };
   });
 
-  const Stat = ({ label, value, sub, warn }) => (
-    <div style={{ flex: 1, textAlign: "center", border: `1px solid ${warn ? PALETTE.rust : "rgba(201,136,42,0.4)"}`, borderRadius: 10, padding: "8px 4px", background: warn ? "rgba(122,28,28,0.06)" : "rgba(201,136,42,0.06)" }}>
-      <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>{value}</div>
-      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.48rem", letterSpacing: 1.5, color: PALETTE.inkSoft, textTransform: "uppercase", marginTop: 2 }}>{label}</div>
-      {sub && <div style={{ fontSize: "0.68rem", color: warn ? PALETTE.rust : PALETTE.inkSoft, marginTop: 2 }}>{sub}</div>}
-    </div>
-  );
-
-  const FeatureRow = ({ f, gained }) => {
-    const [open, setOpen] = useState(false);
-    return (
-      <div style={{ borderBottom: "1px solid rgba(139,94,26,0.14)", opacity: gained ? 1 : 0.55 }}>
-        <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0", cursor: "pointer" }}>
-          <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.gold, width: 26, flexShrink: 0 }}>L{f.level}</span>
-          <span style={{ flex: 1, fontSize: "0.9rem", color: PALETTE.ink }}>{f.name}</span>
-          {gained && (hasFeature(f.name)
-            ? <span style={{ fontSize: "0.62rem", color: PALETTE.green, fontFamily: "Cinzel,serif" }}>✓ on sheet</span>
-            : <button style={{ ...styles.smallBtn, padding: "3px 8px" }} onClick={(e) => { e.stopPropagation(); addFeature(f.name, f.desc); }}>+ Add</button>)}
-          <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
-        </div>
-        {open && <div style={{ padding: "0 0 10px 35px", fontSize: "0.82rem", color: "#3d2b0a", lineHeight: 1.5 }}>{f.desc}</div>}
-      </div>
-    );
-  };
+  const Stat = ClassStat;
+  const FeatureRow = ({ f, gained }) => <ClassFeatureRow f={f} gained={gained} onSheet={hasFeature(f.name)} onAdd={() => addFeature(f.name, f.desc)} styles={styles} />;
 
   const invList = INVOCATIONS.filter((inv) => {
     const held = hasFeature(inv.name);
