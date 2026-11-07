@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { search as srdSearch, fetchDetail, formatDetail, describe } from "./api.js";
-import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage } from "./idb.js";
+import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage, claimOrphanPhotos, deletePhotosFor } from "./idb.js";
 import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText, meetsPrereq } from "./warlock.js";
-
-const STORAGE_KEY = "dnd-sheet-v1";
+import { loadOrMigrateRoster, saveRoster, loadCharacter, saveCharacter, removeCharacter, summarize, newId } from "./roster.js";
+import { ROGUE_TABLE, rogueRowFor, ROGUE_FEATURES, ARCHETYPES, atSpellsFor } from "./rogue.js";
+import { PRESETS } from "./presets.js";
+import { requestUpdate, applyOps, loadApiKey, saveApiKey, MODEL as AI_MODEL } from "./ai.js";
 
 const SHEET_VERSION = 2;
 
@@ -70,6 +72,44 @@ const INITIAL_CHARACTER = {
   // name -> rules text / description (from SRD lookups or typed by hand)
   lore: {},
 };
+
+// An empty level-1 sheet for brand-new characters.
+function blankCharacter(name = "New Character") {
+  return {
+    ...INITIAL_CHARACTER,
+    name, class: "", race: "", background: "", level: 1, proficiencyBonus: 2, patron: "", pact: "",
+    abilities: { strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10 },
+    combat: { ac: 10, initiative: 0, speed: 30, hp: 10, maxHp: 10, tempHp: 0, hitDice: "1d8" },
+    deathSaves: { successes: 0, failures: 0 },
+    savingThrows: Object.fromEntries(Object.keys(INITIAL_CHARACTER.savingThrows).map(k => [k, { prof: false }])),
+    skills: Object.fromEntries(Object.entries(INITIAL_CHARACTER.skills).map(([k, v]) => [k, { ability: v.ability, prof: false }])),
+    features: [], equipment: [], proficiencies: "",
+    spellcasting: { ability: "CHA", saveDC: 10, attackBonus: 2 },
+    spells: { cantrips: [], level1: [], level2: [], level3: [], level4: [], level5: [] },
+    notes: "", lore: {},
+  };
+}
+
+// Load the roster and the active character once at startup. Adopts an old
+// single-sheet save, and seeds the default character when nothing is stored.
+function bootstrap() {
+  const { roster, migratedLegacyId } = loadOrMigrateRoster();
+  if (migratedLegacyId) claimOrphanPhotos(migratedLegacyId).catch(() => {});
+  if (!roster.ids.length) {
+    const id = newId();
+    const c = { ...INITIAL_CHARACTER, id };
+    saveCharacter(id, c);
+    const r = { activeId: id, ids: [id] };
+    saveRoster(r);
+    return { roster: r, char: c };
+  }
+  const id = roster.activeId;
+  const stored = loadCharacter(id);
+  const c = { ...(stored ? hydrate(stored) : blankCharacter()), id };
+  // Persist one-time migrations immediately so they aren't re-applied.
+  if (!stored || c.sheetVersion !== stored.sheetVersion) saveCharacter(id, c);
+  return { roster, char: c };
+}
 
 const SKILL_LABELS = {
   acrobatics: "Acrobatics", animalHandling: "Animal Handling", arcana: "Arcana",
@@ -278,7 +318,10 @@ function LevelUpModal({ char, onApply, onClose, styles }) {
 
 // ── Main App ──
 export default function DnDSheet() {
-  const [char, setChar] = useState(INITIAL_CHARACTER);
+  const [boot] = useState(bootstrap);
+  const [roster, setRoster] = useState(boot.roster);
+  const [char, setChar] = useState(boot.char);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [tab, setTab] = useState("stats");
   const [saved, setSaved] = useState(false);
   const [addingFeature, setAddingFeature] = useState(false);
@@ -290,35 +333,86 @@ export default function DnDSheet() {
   const [levelUpOpen, setLevelUpOpen] = useState(false);
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const h = hydrate(parsed);
-        setChar(h);
-        // Persist one-time migrations immediately so they aren't re-applied.
-        if (h.sheetVersion !== parsed.sheetVersion) localStorage.setItem(STORAGE_KEY, JSON.stringify(h));
-      }
-    } catch {}
-  }, []);
-
   const save = useCallback((data) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    if (saveCharacter(data.id, data)) {
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
-    } catch {}
+    }
   }, []);
 
+  // Every character carries its own id, so the updater can never move a sheet
+  // onto another character's storage slot.
   const update = useCallback((updater) => {
-    setChar(prev => { const next = updater(prev); save(next); return next; });
+    setChar(prev => { const next = { ...updater(prev), id: prev.id }; save(next); return next; });
   }, [save]);
+
+  // ── Roster (multiple characters) ──
+  const commitRoster = (r) => { setRoster(r); saveRoster(r); };
+
+  const switchTo = (id) => {
+    setPickerOpen(false);
+    if (id === char.id) return;
+    const stored = loadCharacter(id);
+    const next = { ...(stored ? hydrate(stored) : blankCharacter()), id };
+    if (!stored || next.sheetVersion !== stored.sheetVersion) saveCharacter(id, next);
+    setChar(next);
+    commitRoster({ ...roster, activeId: id });
+    setTab("stats");
+  };
+
+  const addCharacter = (data) => {
+    const id = newId();
+    const next = { ...data, id };
+    saveCharacter(id, next);
+    commitRoster({ activeId: id, ids: [...roster.ids, id] });
+    setChar(next);
+    setPickerOpen(false);
+    setTab("stats");
+  };
+
+  const duplicateCharacter = (id) => {
+    const src = id === char.id ? char : loadCharacter(id);
+    if (src) addCharacter({ ...hydrate(src), name: `${src.name || "Character"} (copy)` });
+  };
+
+  const deleteCharacter = (id) => {
+    const src = id === char.id ? char : loadCharacter(id);
+    const label = src?.name || "this character";
+    if (!confirm(`Delete ${label}? This removes the sheet and its photos from this device.`)) return;
+    removeCharacter(id);
+    deletePhotosFor(id).catch(() => {});
+    const ids = roster.ids.filter(x => x !== id);
+    if (!ids.length) {
+      // Always keep one sheet around.
+      const nid = newId();
+      const c = { ...blankCharacter(), id: nid };
+      saveCharacter(nid, c);
+      setChar(c);
+      commitRoster({ activeId: nid, ids: [nid] });
+      setTab("stats");
+      return;
+    }
+    if (id === char.id) {
+      const nextId = ids[0];
+      const stored = loadCharacter(nextId);
+      const next = { ...(stored ? hydrate(stored) : blankCharacter()), id: nextId };
+      setChar(next);
+      commitRoster({ activeId: nextId, ids });
+      setTab("stats");
+    } else {
+      commitRoster({ ...roster, ids });
+    }
+  };
 
   const setAbility = (key, val) => update(c => ({ ...c, abilities: { ...c.abilities, [key]: val } }));
   const setCombat = (key, val) => update(c => ({ ...c, combat: { ...c.combat, [key]: val } }));
   const toggleSave = (key) => update(c => ({ ...c, savingThrows: { ...c.savingThrows, [key]: { ...c.savingThrows[key], prof: !c.savingThrows[key].prof } } }));
-  const toggleSkill = (key) => update(c => ({ ...c, skills: { ...c.skills, [key]: { ...c.skills[key], prof: !c.skills[key].prof } } }));
+  // Tap cycles: none → proficient → expertise (double proficiency) → none.
+  const toggleSkill = (key) => update(c => {
+    const sk = c.skills[key];
+    const next = !sk.prof ? { prof: true, expertise: false } : !sk.expertise ? { prof: true, expertise: true } : { prof: false, expertise: false };
+    return { ...c, skills: { ...c.skills, [key]: { ...sk, ...next } } };
+  });
   const toggleDS = (type) => update(c => { const cur = c.deathSaves[type]; return { ...c, deathSaves: { ...c.deathSaves, [type]: cur >= 3 ? 0 : cur + 1 } }; });
   const setLore = (name, text) => update(c => ({ ...c, lore: { ...c.lore, [name]: text } }));
 
@@ -337,7 +431,8 @@ export default function DnDSheet() {
   };
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify(char, null, 2)], { type: "application/json" });
+    const { id: _id, ...portable } = char; // the id is per-device; imports get a fresh one
+    const blob = new Blob([JSON.stringify(portable, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -350,7 +445,7 @@ export default function DnDSheet() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      try { update(() => hydrate(JSON.parse(reader.result))); setTab("stats"); }
+      try { addCharacter(hydrate(JSON.parse(reader.result))); }
       catch { alert("That file could not be read as a character export."); }
     };
     reader.readAsText(file);
@@ -371,7 +466,7 @@ export default function DnDSheet() {
   const s = char;
   const pb = s.proficiencyBonus;
   const getSaveMod = (key) => getMod(s.abilities[key]) + (s.savingThrows[key].prof ? pb : 0);
-  const getSkillMod = (key) => { const sk = s.skills[key]; return getMod(s.abilities[sk.ability]) + (sk.prof ? pb : 0); };
+  const getSkillMod = (key) => { const sk = s.skills[key]; return getMod(s.abilities[sk.ability]) + (sk.expertise ? pb * 2 : sk.prof ? pb : 0); };
 
   const styles = {
     app: { minHeight: "100vh", background: "#0f0804", backgroundImage: "radial-gradient(ellipse at top,#1a0a02 0%,#0a0402 100%)", fontFamily: "'Crimson Text',Georgia,serif", color: PALETTE.ink, maxWidth: 480, margin: "0 auto" },
@@ -379,11 +474,12 @@ export default function DnDSheet() {
     charName: { fontFamily: "'Cinzel Decorative',serif", fontSize: "1.35rem", fontWeight: 900, color: PALETTE.goldLt, textShadow: "0 0 20px rgba(201,136,42,0.4)", lineHeight: 1.05 },
     charSub: { fontFamily: "Cinzel,serif", fontSize: "0.6rem", letterSpacing: 2, color: "#c9882aaa", marginTop: 4 },
     lvChip: { fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, color: PALETTE.darkA, background: `linear-gradient(135deg,${PALETTE.goldLt},${PALETTE.gold})`, borderRadius: 20, padding: "3px 9px", fontWeight: 700, whiteSpace: "nowrap" },
+    switchBtn: { fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, color: PALETTE.goldLt, background: "rgba(201,136,42,0.12)", border: `1px solid ${PALETTE.gold}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", whiteSpace: "nowrap" },
     savedBadge: { fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 2, color: "#7fe089", background: "rgba(76,175,80,0.15)", border: "1px solid rgba(76,175,80,0.35)", borderRadius: 20, padding: "2px 8px", transition: "opacity 0.3s", opacity: saved ? 1 : 0 },
     tabBar: { display: "flex", overflowX: "auto", background: "#0f0804", borderBottom: "1px solid #3d1a05", position: "sticky", top: 62, zIndex: 49, scrollbarWidth: "none" },
     tabBtn: (active) => ({ flex: "0 0 auto", minWidth: 62, padding: "7px 12px 6px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, textTransform: "uppercase", border: "none", cursor: "pointer", background: active ? `linear-gradient(180deg,${PALETTE.darkB},${PALETTE.darkA})` : "transparent", color: active ? PALETTE.goldLt : "#8b5e1a", borderBottom: active ? `2px solid ${PALETTE.gold}` : "2px solid transparent", transition: "all 0.15s" }),
     tabIcon: (active) => ({ fontSize: "0.95rem", color: active ? PALETTE.goldLt : "#7a521a", lineHeight: 1 }),
-    page: { padding: "16px", background: PALETTE.parchment, backgroundImage: "linear-gradient(160deg,#f8eedc 0%,#eedfc0 100%)", minHeight: "calc(100vh - 108px)" },
+    page: { padding: "16px 16px 110px", background: PALETTE.parchment, backgroundImage: "linear-gradient(160deg,#f8eedc 0%,#eedfc0 100%)", minHeight: "calc(100vh - 108px)" },
     sectionTitle: { fontFamily: "Cinzel,serif", fontSize: "0.58rem", letterSpacing: 3, textTransform: "uppercase", color: PALETTE.rust, display: "flex", alignItems: "center", gap: 7, borderBottom: "1px solid rgba(201,136,42,0.4)", paddingBottom: 5, marginBottom: 10, marginTop: 18 },
     card: { background: "rgba(255,250,240,0.65)", border: "1px solid rgba(201,136,42,0.3)", borderRadius: 12, padding: "10px 13px", marginBottom: 10, boxShadow: "0 1px 4px rgba(120,80,20,0.06)" },
     btn: { fontFamily: "Cinzel,serif", fontSize: "0.62rem", letterSpacing: 1.2, textTransform: "uppercase", background: `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})`, border: `1px solid ${PALETTE.gold}`, borderRadius: 8, color: PALETTE.goldLt, padding: "8px 14px", cursor: "pointer" },
@@ -486,12 +582,11 @@ export default function DnDSheet() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button style={styles.addBtn} onClick={handleExport}>⬇ Export JSON</button>
         <button style={styles.addBtn} onClick={() => fileInputRef.current?.click()}>⬆ Import JSON</button>
-        <button onClick={() => { if (confirm("Reset to the original character? This overwrites your current sheet.")) update(() => INITIAL_CHARACTER); }}
-          style={{ ...styles.addBtn, background: "rgba(122,28,28,0.15)", borderColor: PALETTE.rust, color: PALETTE.rust }}>↺ Reset</button>
-        <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+        <button onClick={() => { if (confirm("Clear this sheet back to a blank level-1 character? Other characters are not affected.")) update(c => blankCharacter(c.name)); }}
+          style={{ ...styles.addBtn, background: "rgba(122,28,28,0.15)", borderColor: PALETTE.rust, color: PALETTE.rust }}>↺ Clear Sheet</button>
       </div>
       <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 8, lineHeight: 1.45 }}>
-        Auto-saves on this device. Export a JSON backup to copy your sheet to another device. (Photos in the Paper tab stay on this device.)
+        Auto-saves on this device. Export a JSON backup to copy this character to another device; importing adds it as a new character. (Photos in the Paper tab stay on this device.)
       </div>
     </div>
   );
@@ -505,13 +600,16 @@ export default function DnDSheet() {
           const mod = getSkillMod(key); const sk = s.skills[key];
           return (
             <div key={key} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", borderBottom: "1px solid rgba(139,94,26,0.14)" }}>
-              <Dot on={sk.prof} onClick={() => toggleSkill(key)} />
+              <Dot on={sk.prof} expert={sk.expertise} onClick={() => toggleSkill(key)} />
               <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.7rem", fontWeight: 700, color: "#3d2b0a", minWidth: 30 }}>{fmtMod(mod)}</span>
-              <span style={{ fontSize: "0.85rem", color: PALETTE.ink, flex: 1 }}>{SKILL_LABELS[key]}</span>
+              <span style={{ fontSize: "0.85rem", color: PALETTE.ink, flex: 1 }}>{SKILL_LABELS[key]}{sk.expertise && <span title="Expertise" style={{ color: PALETTE.gold, fontSize: "0.7rem", marginLeft: 5 }}>★</span>}</span>
               <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.52rem", color: PALETTE.inkSoft }}>{ABILITY_SHORT[sk.ability]}</span>
             </div>
           );
         })}
+      </div>
+      <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 6, lineHeight: 1.45 }}>
+        Tap a dot once for proficiency, twice for <b>★ Expertise</b> (double proficiency bonus), a third time to clear it.
       </div>
       <div style={{ ...styles.card, marginTop: 12, textAlign: "center" }}>
         <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.rust, marginBottom: 4 }}>PASSIVE WISDOM (PERCEPTION)</div>
@@ -672,12 +770,15 @@ export default function DnDSheet() {
 
       <div style={styles.header}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, cursor: "pointer" }} onClick={() => setPickerOpen(true)} title="Switch character">
             <div style={styles.charName}>{s.name}</div>
-            <div style={styles.charSub}>{s.class} · {s.race}</div>
+            <div style={styles.charSub}>{[s.class, s.race].filter(Boolean).join(" · ") || "Tap to switch character"}</div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
-            <span style={styles.lvChip}>LV {s.level}</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button style={styles.switchBtn} onClick={() => setPickerOpen(true)} title="Switch character">⇄ {roster.ids.length}</button>
+              <span style={styles.lvChip}>LV {s.level}</span>
+            </div>
             <span style={styles.savedBadge}>✓ SAVED</span>
           </div>
         </div>
@@ -699,22 +800,187 @@ export default function DnDSheet() {
         {tab === "gear" && gearTab()}
         {tab === "class" && <ClassTab char={s} update={update} setLore={setLore} styles={styles} SectionTitle={SectionTitle} />}
         {tab === "codex" && <CodexTab styles={styles} setLore={setLore} update={update} SectionTitle={SectionTitle} />}
-        {tab === "paper" && <PhotoTab styles={styles} SectionTitle={SectionTitle} />}
+        {tab === "paper" && <PhotoTab key={s.id} charId={s.id} styles={styles} SectionTitle={SectionTitle} />}
       </div>
 
+      <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+
+      <AiUpdateBar char={s} update={update} styles={styles} />
+
       {levelUpOpen && <LevelUpModal char={s} styles={styles} onApply={applyLevelUp} onClose={() => setLevelUpOpen(false)} />}
+      {pickerOpen && (
+        <CharacterPicker styles={styles} activeId={s.id}
+          characters={summarize(roster.ids).map(x => x.id === s.id ? { ...x, name: s.name, class: s.class, race: s.race, level: s.level } : x)}
+          onSelect={switchTo} onNew={() => addCharacter(blankCharacter())} onImport={() => fileInputRef.current?.click()}
+          presets={[{ key: "warlock4", label: INITIAL_CHARACTER.name, sub: `${INITIAL_CHARACTER.class} · ${INITIAL_CHARACTER.race}`, data: INITIAL_CHARACTER }, ...PRESETS]}
+          onPreset={(data) => addCharacter(hydrate(JSON.parse(JSON.stringify(data))))}
+          onDuplicate={duplicateCharacter} onDelete={deleteCharacter} onClose={() => setPickerOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// ── DND Update: ask Claude to change the sheet in plain English ──
+function AiUpdateBar({ char, update, styles }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);          // expanded result / settings panel
+  const [result, setResult] = useState(null);       // { summary, applied, rejected, error }
+  const [undo, setUndo] = useState(null);           // previous character for Undo
+  const [apiKey, setApiKey] = useState(loadApiKey);
+  const [editingKey, setEditingKey] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+
+  const submit = async () => {
+    const instruction = text.trim();
+    if (!instruction || busy) return;
+    if (!apiKey) { setEditingKey(true); setOpen(true); return; }
+    setBusy(true); setOpen(true); setResult(null);
+    try {
+      const { ops, summary } = await requestUpdate({ apiKey, char, instruction });
+      if (ops.length) {
+        const before = char;
+        let outcome = null;
+        update((c) => { outcome = applyOps(c, ops); return outcome.char; });
+        setUndo(before);
+        setResult({ summary, applied: outcome?.applied || [], rejected: outcome?.rejected || [] });
+      } else {
+        setResult({ summary, applied: [], rejected: [] });
+      }
+      setText("");
+    } catch (e) {
+      const status = e?.status;
+      const msg = status === 401 ? "That API key was rejected. Check it under ⚙."
+        : status === 429 ? "Rate limited by the API. Try again in a moment."
+        : status === 400 && /credit|billing/i.test(e?.message || "") ? "Your Anthropic account has no credit. Add some at console.anthropic.com."
+        : e?.message || "The request failed.";
+      setResult({ summary: "", applied: [], rejected: [], error: msg });
+    }
+    setBusy(false);
+  };
+
+  const doUndo = () => { if (!undo) return; update(() => ({ ...undo, id: char.id })); setUndo(null); setResult({ summary: "Reverted the last AI change.", applied: [], rejected: [] }); };
+  const saveKey = () => { const k = keyDraft.trim(); saveApiKey(k); setApiKey(k); setKeyDraft(""); setEditingKey(false); };
+
+  const label = { fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 2, textTransform: "uppercase", color: PALETTE.goldLt };
+  return (
+    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 60, display: "flex", justifyContent: "center", pointerEvents: "none" }}>
+      <div style={{ width: "100%", maxWidth: 480, pointerEvents: "auto", background: `linear-gradient(180deg,${PALETTE.darkB},${PALETTE.darkA})`, borderTop: `2px solid ${PALETTE.gold}`, boxShadow: "0 -6px 24px rgba(0,0,0,0.45)", padding: "8px 12px calc(10px + env(safe-area-inset-bottom))" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+          <span style={label}>✦ DND Update</span>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            {undo && <button onClick={doUndo} style={{ ...label, background: "none", border: "none", cursor: "pointer", color: "#f0c674" }}>↶ Undo</button>}
+            {(result || editingKey) && <button onClick={() => setOpen((o) => !o)} style={{ ...label, background: "none", border: "none", cursor: "pointer", color: "#c9882aaa" }}>{open ? "Hide" : "Show"}</button>}
+            <button title="API key settings" onClick={() => { setEditingKey((v) => !v); setOpen(true); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#c9882aaa", fontSize: "0.9rem", lineHeight: 1 }}>⚙</button>
+          </div>
+        </div>
+
+        {open && editingKey && (
+          <div style={{ background: "rgba(245,234,214,0.08)", border: "1px solid rgba(201,136,42,0.4)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, color: "#f5ead6", fontSize: "0.78rem", lineHeight: 1.45 }}>
+            <div style={{ ...label, marginBottom: 4 }}>Anthropic API key</div>
+            {apiKey ? <div style={{ marginBottom: 6 }}>A key is saved on this device (…{apiKey.slice(-4)}).</div>
+              : <div style={{ marginBottom: 6 }}>Paste an API key from <b>console.anthropic.com</b>. It is stored only in this browser and sent only to Anthropic. Each update costs a few cents (model: {AI_MODEL}).</div>}
+            <div style={{ display: "flex", gap: 6 }}>
+              <input type="password" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)} placeholder="sk-ant-…" autoComplete="off"
+                onKeyDown={(e) => { if (e.key === "Enter") saveKey(); }}
+                style={{ flex: 1, background: "rgba(245,234,214,0.92)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.ink, fontFamily: "inherit", fontSize: "0.85rem", padding: "6px 8px" }} />
+              <button onClick={saveKey} disabled={!keyDraft.trim()} style={{ ...styles.smallBtn, color: PALETTE.goldLt, background: "rgba(201,136,42,0.2)" }}>Save</button>
+              {apiKey && <button onClick={() => { saveApiKey(""); setApiKey(""); }} style={{ ...styles.smallBtn, color: "#f0a0a0", borderColor: "#a04040", background: "transparent" }}>Forget</button>}
+            </div>
+          </div>
+        )}
+
+        {open && result && (
+          <div style={{ background: "rgba(245,234,214,0.08)", border: `1px solid ${result.error ? "#a04040" : "rgba(201,136,42,0.4)"}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8, color: "#f5ead6", fontSize: "0.82rem", lineHeight: 1.45 }}>
+            {result.error ? <span style={{ color: "#f0a0a0" }}>{result.error}</span> : <span>{result.summary}</span>}
+            {result.applied.length > 0 && (
+              <div style={{ marginTop: 5, fontSize: "0.7rem", color: "#c9b28a", fontFamily: "monospace", lineHeight: 1.4 }}>
+                {result.applied.map((a, i) => <div key={i}>✓ {a}</div>)}
+                {result.rejected.map((r, i) => <div key={"r" + i} style={{ color: "#f0a0a0" }}>✗ skipped: {r}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 6 }}>
+          <input value={text} onChange={(e) => setText(e.target.value)} disabled={busy}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder={apiKey ? "e.g. “I took 8 damage” or “add Fireball”" : "Tap ⚙ to add your API key, then type here"}
+            style={{ flex: 1, minWidth: 0, background: "rgba(245,234,214,0.92)", border: `1px solid ${PALETTE.gold}`, borderRadius: 8, color: PALETTE.ink, fontFamily: "'Crimson Text',serif", fontSize: "0.95rem", padding: "8px 10px" }} />
+          <button onClick={submit} disabled={busy || !text.trim()}
+            style={{ ...styles.btn, padding: "8px 14px", opacity: busy || !text.trim() ? 0.6 : 1, whiteSpace: "nowrap" }}>{busy ? "…" : "Update"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Character picker (switch / create / duplicate / delete) ──
+function CharacterPicker({ characters, activeId, onSelect, onNew, onImport, onDuplicate, onDelete, onClose, presets = [], onPreset, styles }) {
+  const iconBtn = { background: "none", border: `1px solid rgba(201,136,42,0.5)`, borderRadius: 6, color: PALETTE.inkSoft, cursor: "pointer", fontSize: "0.85rem", width: 28, height: 28, lineHeight: 1, flexShrink: 0 };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 380, maxHeight: "85vh", overflowY: "auto", background: PALETTE.parchment, borderRadius: 14, border: `2px solid ${PALETTE.gold}`, padding: 18, boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }}>
+        <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.2rem", color: PALETTE.rust, textAlign: "center", marginBottom: 2 }}>Characters</div>
+        <div style={{ textAlign: "center", fontFamily: "Cinzel,serif", color: PALETTE.inkSoft, fontSize: "0.6rem", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 14 }}>
+          {characters.length} on this device
+        </div>
+
+        {characters.map(c => {
+          const active = c.id === activeId;
+          return (
+            <div key={c.id} style={{ ...styles.card, display: "flex", alignItems: "center", gap: 10, padding: "9px 10px 9px 12px", cursor: "pointer",
+              border: active ? `1.5px solid ${PALETTE.gold}` : styles.card.border, background: active ? "rgba(201,136,42,0.14)" : styles.card.background }}
+              onClick={() => onSelect(c.id)}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: "Cinzel,serif", fontWeight: 700, fontSize: "0.9rem", color: active ? PALETTE.rust : PALETTE.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {active && <span style={{ color: PALETTE.gold, marginRight: 6 }}>✦</span>}{c.name}
+                </div>
+                <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.58rem", letterSpacing: 1, color: PALETTE.inkSoft, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {[c.class, c.race].filter(Boolean).join(" · ") || "No class set"}
+                </div>
+              </div>
+              <span style={styles.lvChip}>LV {c.level}</span>
+              <button style={iconBtn} title="Duplicate" onClick={e => { e.stopPropagation(); onDuplicate(c.id); }}>⧉</button>
+              <button style={{ ...iconBtn, color: PALETTE.rust, borderColor: "rgba(122,28,28,0.5)" }} title="Delete" onClick={e => { e.stopPropagation(); onDelete(c.id); }}>×</button>
+            </div>
+          );
+        })}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <button style={{ ...styles.btn, flex: 1 }} onClick={onNew}>+ New Character</button>
+          <button style={{ ...styles.btnGhost, flex: 1 }} onClick={onImport}>⬆ Import JSON</button>
+        </div>
+        {presets.length > 0 && (
+          <>
+            <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1.5, color: PALETTE.rust, textTransform: "uppercase", margin: "14px 0 6px" }}>Ready-made characters</div>
+            {presets.map(p => (
+              <button key={p.key} onClick={() => onPreset(p.data)}
+                style={{ ...styles.card, width: "100%", textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", marginBottom: 6, fontFamily: "inherit" }}>
+                <span style={{ color: PALETTE.gold }}>✚</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontFamily: "Cinzel,serif", fontWeight: 700, fontSize: "0.85rem", color: PALETTE.ink }}>{p.label}</span>
+                  <span style={{ display: "block", fontFamily: "Cinzel,serif", fontSize: "0.56rem", letterSpacing: 1, color: PALETTE.inkSoft, marginTop: 2 }}>{p.sub}</span>
+                </span>
+                <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.inkSoft }}>ADD</span>
+              </button>
+            ))}
+          </>
+        )}
+        <button style={{ ...styles.btnGhost, width: "100%", marginTop: 8, borderColor: "rgba(92,68,34,0.5)", color: PALETTE.inkSoft }} onClick={onClose}>Close</button>
+      </div>
     </div>
   );
 }
 
 // ── Small shared bits ──
-function Dot({ on, onClick }) {
+function Dot({ on, expert = false, onClick }) {
   return (
     <div onClick={onClick} style={{
       width: 13, height: 13, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
       background: on ? "radial-gradient(circle at 35% 35%,#e8b84b,#c9882a)" : "#e8d4a8",
       border: `1.5px solid ${on ? "#c9882a" : "#8b5e1a"}`,
-      boxShadow: on ? "0 0 6px rgba(201,136,42,0.5)" : "none",
+      boxShadow: expert ? "0 0 0 2px #f5ead6, 0 0 0 3.5px #c9882a" : on ? "0 0 6px rgba(201,136,42,0.5)" : "none",
     }} />
   );
 }
@@ -731,8 +997,156 @@ function AddInline({ value, setValue, onAdd, onCancel, placeholder, styles }) {
   );
 }
 
-// ── CLASS (Warlock rules at your level) ──
-function ClassTab({ char, update, setLore, styles, SectionTitle }) {
+// ── CLASS tab: picks the rules module from the class name ──
+function ClassTab(props) {
+  const cls = (props.char.class || "").toLowerCase();
+  if (/rogue|thief|assassin|trickster/.test(cls)) return <RogueClassTab {...props} />;
+  if (/warlock/.test(cls)) return <WarlockClassTab {...props} />;
+  return (
+    <div>
+      <props.SectionTitle>Class Rules</props.SectionTitle>
+      <div style={{ ...props.styles.card, fontSize: "0.86rem", color: PALETTE.inkSoft, lineHeight: 1.5 }}>
+        This tab knows the rules for <b>Warlock</b> and <b>Rogue</b>. Put one of those words in the class field on the Stats tab
+        (for example “Rogue 5” or “Arcane Trickster Rogue 12”) to see your features, tables and archetype here.
+        For other classes, use the Codex to look up features and add them to your sheet.
+      </div>
+    </div>
+  );
+}
+
+// Shared bits for the class tabs.
+function ClassStat({ label, value, sub, warn }) {
+  return (
+    <div style={{ flex: 1, textAlign: "center", border: `1px solid ${warn ? PALETTE.rust : "rgba(201,136,42,0.4)"}`, borderRadius: 10, padding: "8px 4px", background: warn ? "rgba(122,28,28,0.06)" : "rgba(201,136,42,0.06)" }}>
+      <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>{value}</div>
+      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.48rem", letterSpacing: 1.5, color: PALETTE.inkSoft, textTransform: "uppercase", marginTop: 2 }}>{label}</div>
+      {sub && <div style={{ fontSize: "0.68rem", color: warn ? PALETTE.rust : PALETTE.inkSoft, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ClassFeatureRow({ f, gained, onSheet, onAdd, styles }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ borderBottom: "1px solid rgba(139,94,26,0.14)", opacity: gained ? 1 : 0.55 }}>
+      <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0", cursor: "pointer" }}>
+        <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.gold, width: 26, flexShrink: 0 }}>L{f.level}</span>
+        <span style={{ flex: 1, fontSize: "0.9rem", color: PALETTE.ink }}>{f.name}</span>
+        {gained && (onSheet
+          ? <span style={{ fontSize: "0.62rem", color: PALETTE.green, fontFamily: "Cinzel,serif" }}>✓ on sheet</span>
+          : <button style={{ ...styles.smallBtn, padding: "3px 8px" }} onClick={(e) => { e.stopPropagation(); onAdd(); }}>+ Add</button>)}
+        <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open && <div style={{ padding: "0 0 10px 35px", fontSize: "0.82rem", color: "#3d2b0a", lineHeight: 1.5 }}>{f.desc}</div>}
+    </div>
+  );
+}
+
+// A sheet feature counts as "on sheet" if it matches the rule name, ignoring a
+// trailing qualifier such as "Sneak Attack (6d6)".
+const featureOnSheet = (features, name) => features.some((f) => f === name || f.replace(/\s*\(.*\)\s*$/, "") === name);
+
+// ── CLASS: Rogue ──
+function RogueClassTab({ char, update, styles, SectionTitle }) {
+  const level = char.level || 1;
+  const row = rogueRowFor(level);
+  const archetype = ARCHETYPES[char.archetype] ? char.archetype : "";
+  const adata = archetype ? ARCHETYPES[archetype] : null;
+  const at = archetype === "Arcane Trickster" ? atSpellsFor(level) : null;
+  const [showAll, setShowAll] = useState(false);
+
+  const cantripsKnown = char.spells.cantrips.length;
+  const spellsKnown = Object.entries(char.spells).filter(([k]) => k !== "cantrips").reduce((n, [, arr]) => n + arr.length, 0);
+  const hasFeature = (name) => featureOnSheet(char.features, name);
+  const addFeature = (name, desc) => update((c) => ({
+    ...c,
+    features: featureOnSheet(c.features, name) ? c.features : [...c.features, name],
+    lore: { ...c.lore, [name]: c.lore[name] || desc },
+  }));
+  const FeatureRow = ({ f, gained }) => <ClassFeatureRow f={f} gained={gained} onSheet={hasFeature(f.name)} onAdd={() => addFeature(f.name, f.desc)} styles={styles} />;
+  const ordinal = (n) => `${n}${["st", "nd", "rd"][n - 1] || "th"}`;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>Rogue {level}</div>
+        <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.62rem", color: PALETTE.inkSoft }}>
+          Archetype:{" "}
+          <select value={archetype} onChange={(e) => update((c) => ({ ...c, archetype: e.target.value }))}
+            style={{ fontFamily: "inherit", fontSize: "0.7rem", background: "rgba(201,136,42,0.1)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.ink, padding: "2px 4px" }}>
+            <option value="">— (from 3rd level)</option>
+            {Object.keys(ARCHETYPES).map((a) => <option key={a}>{a}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <SectionTitle>At Your Level</SectionTitle>
+      <div style={{ display: "flex", gap: 6 }}>
+        <ClassStat label="Sneak Attack" value={`${row.sneak}d6`} sub="once per turn" />
+        <ClassStat label="Prof Bonus" value={`+${row.pb}`} sub={char.proficiencyBonus !== row.pb ? `sheet says +${char.proficiencyBonus}` : "matches sheet"} warn={char.proficiencyBonus !== row.pb} />
+        <ClassStat label="Expertise" value={level >= 6 ? 4 : 2} sub={`have ${Object.values(char.skills).filter((k) => k.expertise).length} skills`} />
+      </div>
+      {at && (
+        <>
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <ClassStat label="Cantrips" value={at.cantrips} sub={`have ${cantripsKnown}`} warn={cantripsKnown < at.cantrips} />
+            <ClassStat label="Spells Known" value={at.spellsKnown} sub={`have ${spellsKnown}`} warn={spellsKnown !== at.spellsKnown} />
+            <ClassStat label="Spell Slots" value={at.slots.join(" / ")} sub={at.slots.map((_, i) => ordinal(i + 1)).join(" / ")} />
+          </div>
+          <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 6, lineHeight: 1.45 }}>
+            Wizard spells, Intelligence-based. Slots return on a <b>long</b> rest. Racial cantrips (e.g. High Elf) count on top of the table. Red boxes mean your sheet doesn't match the table for level {level}.
+          </div>
+        </>
+      )}
+
+      <SectionTitle>Class Features</SectionTitle>
+      <div style={styles.card}>
+        {ROGUE_FEATURES.filter((f) => showAll || f.level <= level).map((f) => <FeatureRow key={f.name} f={f} gained={f.level <= level} />)}
+        <button style={{ ...styles.smallBtn, marginTop: 8 }} onClick={() => setShowAll((v) => !v)}>{showAll ? "Hide future levels" : "Show future levels"}</button>
+      </div>
+
+      {adata && (
+        <>
+          <SectionTitle>{archetype}</SectionTitle>
+          <div style={styles.card}>
+            <div style={{ fontSize: "0.8rem", color: PALETTE.inkSoft, lineHeight: 1.45, marginBottom: 6 }}>{adata.blurb}</div>
+            {adata.features.filter((f) => showAll || f.level <= level).map((f) => <FeatureRow key={f.name} f={f} gained={f.level <= level} />)}
+          </div>
+        </>
+      )}
+
+      <SectionTitle>Rogue Table</SectionTitle>
+      <div style={{ ...styles.card, padding: "6px 8px", overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.74rem", fontFamily: "Cinzel,serif" }}>
+          <thead>
+            <tr style={{ color: PALETTE.rust, fontSize: "0.55rem", letterSpacing: 1 }}>
+              <th style={{ textAlign: "left", padding: "4px 2px" }}>LV</th><th style={{ padding: "4px 2px" }}>PB</th><th style={{ padding: "4px 2px" }}>SNEAK</th>
+              {at && <><th style={{ padding: "4px 2px" }}>CANT</th><th style={{ padding: "4px 2px" }}>SPELLS</th><th style={{ padding: "4px 2px" }}>SLOTS</th></>}
+              <th style={{ textAlign: "left", padding: "4px 2px" }}>FEATURES</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ROGUE_TABLE.map((r) => {
+              const sp = archetype === "Arcane Trickster" ? atSpellsFor(r.level) : null;
+              const names = [...ROGUE_FEATURES.filter((f) => f.level === r.level).map((f) => f.name), ...(adata ? adata.features.filter((f) => f.level === r.level).map((f) => f.name) : [])];
+              return (
+                <tr key={r.level} style={{ background: r.level === level ? "rgba(201,136,42,0.18)" : "transparent", color: r.level <= level ? PALETTE.ink : PALETTE.inkSoft, textAlign: "center" }}>
+                  <td style={{ textAlign: "left", padding: "3px 2px", fontWeight: r.level === level ? 700 : 400 }}>{r.level}</td>
+                  <td style={{ padding: "3px 2px" }}>+{r.pb}</td><td style={{ padding: "3px 2px" }}>{r.sneak}d6</td>
+                  {at && <><td style={{ padding: "3px 2px" }}>{sp ? sp.cantrips : "—"}</td><td style={{ padding: "3px 2px" }}>{sp ? sp.spellsKnown : "—"}</td><td style={{ padding: "3px 2px", whiteSpace: "nowrap" }}>{sp ? sp.slots.join("/") : "—"}</td></>}
+                  <td style={{ textAlign: "left", padding: "3px 2px", fontFamily: "'Crimson Text',serif", fontSize: "0.78rem" }}>{names.join(", ")}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── CLASS: Warlock ──
+function WarlockClassTab({ char, update, setLore, styles, SectionTitle }) {
   const level = char.level || 1;
   const row = rowFor(level);
   const patron = PATRONS[char.patron] ? char.patron : "Archfey";
@@ -760,30 +1174,8 @@ function ClassTab({ char, update, setLore, styles, SectionTitle }) {
     return bucket.includes(name) ? c : { ...c, spells: { ...c.spells, [key]: [...bucket, name] } };
   });
 
-  const Stat = ({ label, value, sub, warn }) => (
-    <div style={{ flex: 1, textAlign: "center", border: `1px solid ${warn ? PALETTE.rust : "rgba(201,136,42,0.4)"}`, borderRadius: 10, padding: "8px 4px", background: warn ? "rgba(122,28,28,0.06)" : "rgba(201,136,42,0.06)" }}>
-      <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.05rem", color: PALETTE.rust }}>{value}</div>
-      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.48rem", letterSpacing: 1.5, color: PALETTE.inkSoft, textTransform: "uppercase", marginTop: 2 }}>{label}</div>
-      {sub && <div style={{ fontSize: "0.68rem", color: warn ? PALETTE.rust : PALETTE.inkSoft, marginTop: 2 }}>{sub}</div>}
-    </div>
-  );
-
-  const FeatureRow = ({ f, gained }) => {
-    const [open, setOpen] = useState(false);
-    return (
-      <div style={{ borderBottom: "1px solid rgba(139,94,26,0.14)", opacity: gained ? 1 : 0.55 }}>
-        <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0", cursor: "pointer" }}>
-          <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", color: PALETTE.gold, width: 26, flexShrink: 0 }}>L{f.level}</span>
-          <span style={{ flex: 1, fontSize: "0.9rem", color: PALETTE.ink }}>{f.name}</span>
-          {gained && (hasFeature(f.name)
-            ? <span style={{ fontSize: "0.62rem", color: PALETTE.green, fontFamily: "Cinzel,serif" }}>✓ on sheet</span>
-            : <button style={{ ...styles.smallBtn, padding: "3px 8px" }} onClick={(e) => { e.stopPropagation(); addFeature(f.name, f.desc); }}>+ Add</button>)}
-          <span style={{ color: PALETTE.inkSoft, fontSize: "0.7rem", width: 12, textAlign: "center" }}>{open ? "▾" : "▸"}</span>
-        </div>
-        {open && <div style={{ padding: "0 0 10px 35px", fontSize: "0.82rem", color: "#3d2b0a", lineHeight: 1.5 }}>{f.desc}</div>}
-      </div>
-    );
-  };
+  const Stat = ClassStat;
+  const FeatureRow = ({ f, gained }) => <ClassFeatureRow f={f} gained={gained} onSheet={hasFeature(f.name)} onAdd={() => addFeature(f.name, f.desc)} styles={styles} />;
 
   const invList = INVOCATIONS.filter((inv) => {
     const held = hasFeature(inv.name);
@@ -1007,7 +1399,7 @@ function CodexTab({ styles, setLore, update, SectionTitle }) {
 }
 
 // ── PAPER (photo attachments) ──
-function PhotoTab({ styles, SectionTitle }) {
+function PhotoTab({ styles, SectionTitle, charId }) {
   const [photos, setPhotos] = useState(null);
   const [viewer, setViewer] = useState(null);
   const [zoom, setZoom] = useState(false);
@@ -1015,8 +1407,8 @@ function PhotoTab({ styles, SectionTitle }) {
   const uploadRef = useRef(null);
   const cameraRef = useRef(null);
 
-  const reload = async () => { try { setPhotos(await getPhotos()); } catch { setPhotos([]); } };
-  useEffect(() => { reload(); }, []);
+  const reload = async () => { try { setPhotos(await getPhotos(charId)); } catch { setPhotos([]); } };
+  useEffect(() => { setPhotos(null); reload(); }, [charId]);
 
   const onFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -1026,7 +1418,7 @@ function PhotoTab({ styles, SectionTitle }) {
       try {
         const dataUrl = await resizeImage(f);
         const id = (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        await addPhoto({ id, dataUrl, caption: "", created: Date.now() });
+        await addPhoto({ id, charId, dataUrl, caption: "", created: Date.now() });
       } catch {}
     }
     e.target.value = "";
@@ -1041,7 +1433,7 @@ function PhotoTab({ styles, SectionTitle }) {
     <div>
       <SectionTitle>Paper Sheet Photos</SectionTitle>
       <div style={{ fontSize: "0.8rem", color: PALETTE.inkSoft, marginBottom: 12, lineHeight: 1.45 }}>
-        Snap or upload photos of your paper character sheet to keep as reference. Tap a photo to view it full-screen and zoom in while you copy values across.
+        Snap or upload photos of this character's paper sheet to keep as reference. Tap a photo to view it full-screen and zoom in while you copy values across.
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
