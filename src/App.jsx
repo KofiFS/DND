@@ -6,6 +6,7 @@ import { loadOrMigrateRoster, saveRoster, loadCharacter, saveCharacter, removeCh
 import { ROGUE_TABLE, rogueRowFor, ROGUE_FEATURES, ARCHETYPES, atSpellsFor } from "./rogue.js";
 import { PRESETS } from "./presets.js";
 import { requestUpdate, applyOps, loadApiKey, saveApiKey, MODEL as AI_MODEL } from "./ai.js";
+import { DICE, rollFormula, rollCheck, fmtSigned, formulaText } from "./dice.js";
 
 const SHEET_VERSION = 2;
 
@@ -456,6 +457,7 @@ export default function DnDSheet() {
     { id: "stats", label: "Stats", icon: "❖" },
     { id: "skills", label: "Skills", icon: "✦" },
     { id: "combat", label: "Combat", icon: "⚔" },
+    { id: "dice", label: "Dice", icon: "⚄" },
     { id: "spells", label: "Spells", icon: "✷" },
     { id: "class", label: "Class", icon: "☽" },
     { id: "gear", label: "Gear", icon: "⚙" },
@@ -796,6 +798,7 @@ export default function DnDSheet() {
         {tab === "stats" && statsTab()}
         {tab === "skills" && skillsTab()}
         {tab === "combat" && combatTab()}
+        {tab === "dice" && <DiceTab char={s} getSaveMod={getSaveMod} getSkillMod={getSkillMod} styles={styles} SectionTitle={SectionTitle} />}
         {tab === "spells" && spellsTab()}
         {tab === "gear" && gearTab()}
         {tab === "class" && <ClassTab char={s} update={update} setLore={setLore} styles={styles} SectionTitle={SectionTitle} />}
@@ -815,6 +818,169 @@ export default function DnDSheet() {
           presets={[{ key: "warlock4", label: INITIAL_CHARACTER.name, sub: `${INITIAL_CHARACTER.class} · ${INITIAL_CHARACTER.race}`, data: INITIAL_CHARACTER }, ...PRESETS]}
           onPreset={(data) => addCharacter(hydrate(JSON.parse(JSON.stringify(data))))}
           onDuplicate={duplicateCharacter} onDelete={deleteCharacter} onClose={() => setPickerOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// ── DICE ──
+function DiceTab({ char, getSaveMod, getSkillMod, styles, SectionTitle }) {
+  const [count, setCount] = useState(1);
+  const [mod, setMod] = useState(0);
+  const [mode, setMode] = useState("normal"); // d20 checks: normal | adv | dis
+  const [formula, setFormula] = useState("");
+  const [formulaErr, setFormulaErr] = useState("");
+  const [last, setLast] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [showSkills, setShowSkills] = useState(false);
+  const [spin, setSpin] = useState(0);
+
+  const push = (entry) => {
+    const e = { ...entry, at: Date.now(), id: `${Date.now()}-${Math.random()}` };
+    setLast(e);
+    setSpin((n) => n + 1);
+    setHistory((h) => [e, ...h].slice(0, 30));
+  };
+
+  const rollQuick = (sides) => {
+    const text = `${count}d${sides}${mod ? fmtSigned(mod) : ""}`;
+    const r = rollFormula(text);
+    const dice = r.terms.filter((t) => t.rolls).flatMap((t) => t.rolls.map((v, i) => ({ v, sides: t.sides, kept: t.kept.includes(i) })));
+    push({ label: `${count}d${sides}${mod ? " " + fmtSigned(mod) : ""}`, total: r.total, dice, detail: mod ? `${dice.map((d) => d.v).join(" + ")} ${fmtSigned(mod)}` : dice.length > 1 ? dice.map((d) => d.v).join(" + ") : "",
+      crit: sides === 20 && count === 1 && dice[0].v === 20, fumble: sides === 20 && count === 1 && dice[0].v === 1 });
+  };
+
+  const rollText = () => {
+    const r = rollFormula(formula);
+    if (r.error) { setFormulaErr(r.error); return; }
+    setFormulaErr("");
+    const dice = r.terms.filter((t) => t.rolls).flatMap((t) => t.rolls.map((v, i) => ({ v, sides: t.sides, kept: t.kept.includes(i) })));
+    const detail = r.terms.map((t) => t.constant !== undefined ? fmtSigned(t.constant) : `[${t.rolls.map((v, i) => t.kept.includes(i) ? v : `(${v})`).join(", ")}]`).join(" ");
+    push({ label: formulaText(r.terms), total: r.total, dice, detail });
+  };
+
+  const check = (label, m) => {
+    const r = rollCheck(m, mode);
+    push({ label, total: r.total, dice: r.rolls.map((v) => ({ v, sides: 20, kept: v === r.die })), crit: r.crit, fumble: r.fumble,
+      detail: `${r.rolls.length > 1 ? `[${r.rolls.join(", ")}] → ${r.die}` : r.die} ${fmtSigned(m)}${mode !== "normal" ? ` (${mode === "adv" ? "advantage" : "disadvantage"})` : ""}` });
+  };
+
+  const chip = (active, extra = {}) => ({ ...styles.smallBtn, padding: "6px 10px", background: active ? `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})` : "rgba(61,26,5,0.08)", color: active ? PALETTE.goldLt : PALETTE.darkB, ...extra });
+  const rollBtn = { ...styles.smallBtn, textTransform: "none", letterSpacing: 0, fontFamily: "'Crimson Text',serif", fontSize: "0.86rem", padding: "6px 9px", display: "flex", justifyContent: "space-between", gap: 6, width: "100%" };
+  const dieFace = (d) => ({ display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 30, height: 30, padding: "0 6px", borderRadius: d.sides === 20 ? "50%" : 7, fontFamily: "Cinzel,serif", fontWeight: 700, fontSize: "0.85rem",
+    background: d.kept ? `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})` : "transparent", color: d.kept ? PALETTE.goldLt : PALETTE.inkSoft, border: `1.5px solid ${d.kept ? PALETTE.gold : "rgba(139,94,26,0.4)"}`, textDecoration: d.kept ? "none" : "line-through", opacity: d.kept ? 1 : 0.6 });
+
+  const hitDie = (() => { const m = /d(\d+)/.exec(char.combat.hitDice || ""); return m ? Number(m[1]) : 8; })();
+  const conMod = getMod(char.abilities.constitution);
+  const initMod = char.combat.initiative ?? getMod(char.abilities.dexterity);
+
+  return (
+    <div>
+      <style>{`@keyframes dndRoll{0%{transform:scale(0.7) rotate(-12deg);opacity:0.2}60%{transform:scale(1.08) rotate(3deg);opacity:1}100%{transform:scale(1) rotate(0)}}`}</style>
+
+      {/* Result */}
+      <div style={{ ...styles.card, textAlign: "center", padding: "14px 12px", border: `1.5px solid ${last?.crit ? PALETTE.green : last?.fumble ? PALETTE.rust : "rgba(201,136,42,0.5)"}`, background: last?.crit ? "rgba(61,106,28,0.08)" : last?.fumble ? "rgba(122,28,28,0.08)" : styles.card.background }}>
+        {last ? (
+          <div key={spin} style={{ animation: "dndRoll 0.35s ease-out" }}>
+            <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.6rem", letterSpacing: 2, color: PALETTE.inkSoft, textTransform: "uppercase" }}>{last.label}</div>
+            <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "3.2rem", lineHeight: 1.1, color: last.crit ? PALETTE.green : last.fumble ? PALETTE.rust : PALETTE.rust }}>{last.total}</div>
+            {last.crit && <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.65rem", letterSpacing: 2, color: PALETTE.green }}>NATURAL 20</div>}
+            {last.fumble && <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.65rem", letterSpacing: 2, color: PALETTE.rust }}>NATURAL 1</div>}
+            {last.dice?.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", marginTop: 8 }}>
+                {last.dice.map((d, i) => <span key={i} style={dieFace(d)}>{d.v}</span>)}
+              </div>
+            )}
+            {last.detail && <div style={{ fontSize: "0.78rem", color: PALETTE.inkSoft, marginTop: 6 }}>{last.detail}</div>}
+          </div>
+        ) : (
+          <div style={{ color: PALETTE.inkSoft, fontSize: "0.9rem", padding: "10px 0" }}>Tap a die or a check below to roll.</div>
+        )}
+      </div>
+
+      <SectionTitle>Quick Roll</SectionTitle>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1.5, color: PALETTE.inkSoft }}>DICE</span>
+        <button style={styles.hpBtn} onClick={() => setCount((c) => Math.max(1, c - 1))}>−</button>
+        <span style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.2rem", color: PALETTE.rust, minWidth: 24, textAlign: "center" }}>{count}</span>
+        <button style={styles.hpBtn} onClick={() => setCount((c) => Math.min(20, c + 1))}>+</button>
+        <span style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1.5, color: PALETTE.inkSoft, marginLeft: 8 }}>MOD</span>
+        <button style={styles.hpBtn} onClick={() => setMod((m) => m - 1)}>−</button>
+        <span style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.2rem", color: PALETTE.rust, minWidth: 34, textAlign: "center" }}>{fmtSigned(mod)}</span>
+        <button style={styles.hpBtn} onClick={() => setMod((m) => m + 1)}>+</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
+        {DICE.map((d) => (
+          <button key={d} onClick={() => rollQuick(d)}
+            style={{ ...styles.btn, padding: "12px 4px", fontSize: "0.8rem", letterSpacing: 1, borderRadius: d === 20 ? 14 : 10 }}>d{d}</button>
+        ))}
+        <button onClick={() => { setCount(1); setMod(0); }} style={{ ...styles.btnGhost, padding: "12px 4px", fontSize: "0.6rem" }}>Reset</button>
+      </div>
+
+      <SectionTitle>Formula</SectionTitle>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input value={formula} onChange={(e) => { setFormula(e.target.value); setFormulaErr(""); }} onKeyDown={(e) => e.key === "Enter" && rollText()}
+          placeholder="2d6+3, d20+5, 4d6kh3…" style={{ ...styles.input, fontSize: "1rem" }} inputMode="text" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+        <button style={styles.btn} onClick={rollText} disabled={!formula.trim()}>Roll</button>
+      </div>
+      <div style={{ fontSize: "0.72rem", color: formulaErr ? PALETTE.rust : PALETTE.inkSoft, marginTop: 6, lineHeight: 1.45 }}>
+        {formulaErr || <>Use <b>kh</b>/<b>kl</b> to keep highest or lowest: <b>4d6kh3</b> for ability scores, <b>2d20kl1</b> for disadvantage.</>}
+      </div>
+
+      <SectionTitle>From Your Sheet</SectionTitle>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        {[["normal", "Normal"], ["adv", "Advantage"], ["dis", "Disadvantage"]].map(([k, l]) => (
+          <button key={k} onClick={() => setMode(k)} style={chip(mode === k, { flex: 1 })}>{l}</button>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
+        <button style={rollBtn} onClick={() => check("Initiative", initMod)}><span>⚡ Initiative</span><b>{fmtSigned(initMod)}</b></button>
+        <button style={rollBtn} onClick={() => check("Spell Attack", char.spellcasting.attackBonus || 0)}><span>✷ Spell Attack</span><b>{fmtSigned(char.spellcasting.attackBonus || 0)}</b></button>
+        <button style={rollBtn} onClick={() => { const r = rollFormula(`1d${hitDie}${conMod ? fmtSigned(conMod) : ""}`); push({ label: `Hit Die (d${hitDie} ${fmtSigned(conMod)} CON)`, total: Math.max(1, r.total), dice: r.terms[0].rolls.map((v) => ({ v, sides: hitDie, kept: true })), detail: `${r.terms[0].rolls[0]} ${fmtSigned(conMod)}` }); }}>
+          <span>♥ Hit Die</span><b>d{hitDie}{fmtSigned(conMod)}</b>
+        </button>
+        <button style={rollBtn} onClick={() => check("Death Save", 0)}><span>☠ Death Save</span><b>d20</b></button>
+      </div>
+
+      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.rust, textTransform: "uppercase", margin: "10px 0 6px" }}>Ability Checks</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
+        {Object.entries(char.abilities).map(([k, v]) => (
+          <button key={k} style={rollBtn} onClick={() => check(`${ABILITY_SHORT[k]} Check`, getMod(v))}><span>{ABILITY_SHORT[k]}</span><b>{fmtSigned(getMod(v))}</b></button>
+        ))}
+      </div>
+      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.rust, textTransform: "uppercase", margin: "10px 0 6px" }}>Saving Throws</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
+        {Object.keys(char.savingThrows).map((k) => (
+          <button key={k} style={rollBtn} onClick={() => check(`${ABILITY_SHORT[k]} Save`, getSaveMod(k))}><span>{ABILITY_SHORT[k]}{char.savingThrows[k].prof ? " ●" : ""}</span><b>{fmtSigned(getSaveMod(k))}</b></button>
+        ))}
+      </div>
+      <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 2, color: PALETTE.rust, textTransform: "uppercase", margin: "10px 0 6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>Skills</span>
+        <button onClick={() => setShowSkills((v) => !v)} style={{ ...styles.smallBtn, padding: "2px 8px" }}>{showSkills ? "Hide" : "Show all"}</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {Object.keys(char.skills).filter((k) => showSkills || char.skills[k].prof).map((k) => (
+          <button key={k} style={rollBtn} onClick={() => check(SKILL_LABELS[k], getSkillMod(k))}>
+            <span>{SKILL_LABELS[k]}{char.skills[k].expertise ? " ★" : char.skills[k].prof ? " ●" : ""}</span><b>{fmtSigned(getSkillMod(k))}</b>
+          </button>
+        ))}
+        {!showSkills && !Object.values(char.skills).some((sk) => sk.prof) && <div style={{ gridColumn: "1 / -1", fontSize: "0.8rem", color: PALETTE.inkSoft }}>No proficient skills yet. Tap “Show all”.</div>}
+      </div>
+
+      {history.length > 0 && (
+        <>
+          <SectionTitle>History</SectionTitle>
+          <div style={{ ...styles.card, padding: "4px 12px" }}>
+            {history.map((h) => (
+              <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid rgba(139,94,26,0.14)", fontSize: "0.84rem" }}>
+                <span style={{ fontFamily: "Cinzel,serif", fontWeight: 700, minWidth: 34, textAlign: "right", color: h.crit ? PALETTE.green : h.fumble ? PALETTE.rust : "#3d2b0a" }}>{h.total}</span>
+                <span style={{ flex: 1, color: PALETTE.ink }}>{h.label}</span>
+                <span style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, textAlign: "right" }}>{h.detail}</span>
+              </div>
+            ))}
+            <button onClick={() => { setHistory([]); setLast(null); }} style={{ ...styles.smallBtn, margin: "8px 0 6px" }}>Clear</button>
+          </div>
+        </>
       )}
     </div>
   );
