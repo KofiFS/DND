@@ -18,6 +18,8 @@ A mobile-friendly, auto-saving D&D 5e character sheet with live SRD rules lookup
   ("I took 8 damage", "long rest", "add Fireball", "I hit level 5") and Claude updates the
   sheet for you, showing exactly what changed with an Undo button. Needs an Anthropic API key
   (tap ⚙ in the bar); the key is stored only in your browser and each update costs a few cents.
+  Tap 🎤 to dictate instead of typing (Chrome, Safari, Edge); when you speak a request the
+  reply is read back aloud, and 🔊 replays it.
 - **Tabs:** Stats, Skills, Combat, Spells, Gear, and a **Codex**.
 - **Notes** field for session notes, lore, and reminders.
 - **Codex** — search the official [D&D 5e SRD](https://www.dnd5eapi.co) for spells,

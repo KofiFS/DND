@@ -830,11 +830,57 @@ function AiUpdateBar({ char, update, styles }) {
   const [apiKey, setApiKey] = useState(loadApiKey);
   const [editingKey, setEditingKey] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
+  const [listening, setListening] = useState(false);
+  const recRef = useRef(null);
+  const byVoiceRef = useRef(false);   // speak the reply aloud when the request was dictated
+
+  // Voice: dictation via the browser's built-in speech recognition (Chrome, Safari, Edge),
+  // and spoken replies via speechSynthesis. Both are free and run on the device.
+  const SpeechRec = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+  const canSpeak = typeof window !== "undefined" && !!window.speechSynthesis;
+  const speak = (msg) => {
+    if (!canSpeak || !msg) return;
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(msg);
+      u.lang = navigator.language || "en-US";
+      window.speechSynthesis.speak(u);
+    } catch {}
+  };
+  const stopListening = () => { try { recRef.current?.stop(); } catch {} };
+  const startListening = () => {
+    if (!SpeechRec || busy) return;
+    if (listening) { stopListening(); return; }
+    const rec = new SpeechRec();
+    rec.lang = navigator.language || "en-US";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (e) => {
+      const transcript = Array.from(e.results).map((r) => r[0].transcript).join(" ").replace(/\s+/g, " ").trim();
+      setText(transcript);
+      if (transcript) byVoiceRef.current = true;
+    };
+    rec.onerror = (e) => {
+      setListening(false);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        setOpen(true); setResult({ summary: "", applied: [], rejected: [], error: "Microphone access was blocked. Allow the mic for this site in your browser settings and try again." });
+      } else if (e.error !== "aborted" && e.error !== "no-speech") {
+        setOpen(true); setResult({ summary: "", applied: [], rejected: [], error: `Voice input failed (${e.error}).` });
+      }
+    };
+    rec.onend = () => { setListening(false); recRef.current = null; };
+    recRef.current = rec;
+    try { rec.start(); setListening(true); } catch { setListening(false); }
+  };
+  useEffect(() => () => { stopListening(); try { window.speechSynthesis?.cancel(); } catch {} }, []);
 
   const submit = async () => {
     const instruction = text.trim();
     if (!instruction || busy) return;
     if (!apiKey) { setEditingKey(true); setOpen(true); return; }
+    stopListening();
+    const spoken = byVoiceRef.current; byVoiceRef.current = false;
     setBusy(true); setOpen(true); setResult(null);
     try {
       const { ops, summary } = await requestUpdate({ apiKey, char, instruction });
@@ -847,6 +893,7 @@ function AiUpdateBar({ char, update, styles }) {
       } else {
         setResult({ summary, applied: [], rejected: [] });
       }
+      if (spoken) speak(summary);
       setText("");
     } catch (e) {
       const status = e?.status;
@@ -892,7 +939,12 @@ function AiUpdateBar({ char, update, styles }) {
 
         {open && result && (
           <div style={{ background: "rgba(245,234,214,0.08)", border: `1px solid ${result.error ? "#a04040" : "rgba(201,136,42,0.4)"}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8, color: "#f5ead6", fontSize: "0.82rem", lineHeight: 1.45 }}>
-            {result.error ? <span style={{ color: "#f0a0a0" }}>{result.error}</span> : <span>{result.summary}</span>}
+            {result.error ? <span style={{ color: "#f0a0a0" }}>{result.error}</span> : (
+              <span>
+                {result.summary}
+                {canSpeak && result.summary && <button title="Read aloud" onClick={() => speak(result.summary)} style={{ background: "none", border: "none", cursor: "pointer", color: "#c9882aaa", fontSize: "0.9rem", marginLeft: 6, lineHeight: 1, verticalAlign: "middle" }}>🔊</button>}
+              </span>
+            )}
             {result.applied.length > 0 && (
               <div style={{ marginTop: 5, fontSize: "0.7rem", color: "#c9b28a", fontFamily: "monospace", lineHeight: 1.4 }}>
                 {result.applied.map((a, i) => <div key={i}>✓ {a}</div>)}
@@ -903,10 +955,18 @@ function AiUpdateBar({ char, update, styles }) {
         )}
 
         <div style={{ display: "flex", gap: 6 }}>
-          <input value={text} onChange={(e) => setText(e.target.value)} disabled={busy}
+          {SpeechRec && (
+            <button onClick={startListening} disabled={busy} title={listening ? "Stop listening" : "Speak your update"} aria-label={listening ? "Stop listening" : "Speak your update"} aria-pressed={listening}
+              style={{ width: 40, flexShrink: 0, borderRadius: 8, cursor: "pointer", fontSize: "1.1rem", lineHeight: 1,
+                border: `1px solid ${listening ? "#e05050" : PALETTE.gold}`, background: listening ? "rgba(224,80,80,0.25)" : "rgba(201,136,42,0.15)", color: listening ? "#ffb0b0" : PALETTE.goldLt,
+                boxShadow: listening ? "0 0 0 3px rgba(224,80,80,0.25)" : "none", transition: "all 0.2s" }}>
+              {listening ? "■" : "🎤"}
+            </button>
+          )}
+          <input value={text} onChange={(e) => { setText(e.target.value); byVoiceRef.current = false; }} disabled={busy}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-            placeholder={apiKey ? "e.g. “I took 8 damage” or “add Fireball”" : "Tap ⚙ to add your API key, then type here"}
-            style={{ flex: 1, minWidth: 0, background: "rgba(245,234,214,0.92)", border: `1px solid ${PALETTE.gold}`, borderRadius: 8, color: PALETTE.ink, fontFamily: "'Crimson Text',serif", fontSize: "0.95rem", padding: "8px 10px" }} />
+            placeholder={listening ? "Listening…" : apiKey ? (SpeechRec ? "Type or tap 🎤 — “I took 8 damage”" : "e.g. “I took 8 damage” or “add Fireball”") : "Tap ⚙ to add your API key, then type here"}
+            style={{ flex: 1, minWidth: 0, background: listening ? "rgba(255,230,230,0.95)" : "rgba(245,234,214,0.92)", border: `1px solid ${listening ? "#e05050" : PALETTE.gold}`, borderRadius: 8, color: PALETTE.ink, fontFamily: "'Crimson Text',serif", fontSize: "0.95rem", padding: "8px 10px" }} />
           <button onClick={submit} disabled={busy || !text.trim()}
             style={{ ...styles.btn, padding: "8px 14px", opacity: busy || !text.trim() ? 0.6 : 1, whiteSpace: "nowrap" }}>{busy ? "…" : "Update"}</button>
         </div>
