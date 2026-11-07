@@ -2,6 +2,9 @@
 // Photos are binary-ish and can be large, so they live in IndexedDB rather than
 // localStorage (which holds the character JSON). Note: photos are therefore NOT
 // part of the JSON export — they stay on the device.
+// Each photo carries a `charId` so every character in the roster has its own
+// Paper tab. Photos saved before the roster existed have no charId; the app
+// assigns them to the migrated character via claimOrphanPhotos().
 
 const DB_NAME = "dnd-photos";
 const STORE = "photos";
@@ -30,14 +33,54 @@ export async function addPhoto(photo) {
   });
 }
 
-export async function getPhotos() {
+async function getAllPhotos() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
     const req = tx.objectStore(STORE).getAll();
-    req.onsuccess = () =>
-      resolve((req.result || []).sort((a, b) => a.created - b.created));
+    req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => reject(req.error);
+  });
+}
+
+// Photos for one character, oldest first. Without a charId, returns everything.
+export async function getPhotos(charId) {
+  const all = await getAllPhotos();
+  return all
+    .filter((p) => !charId || p.charId === charId)
+    .sort((a, b) => a.created - b.created);
+}
+
+async function putMany(photos) {
+  if (!photos.length) return;
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    photos.forEach((p) => store.put(p));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Attach any photos saved before the roster existed to the given character.
+export async function claimOrphanPhotos(charId) {
+  const all = await getAllPhotos();
+  await putMany(all.filter((p) => !p.charId).map((p) => ({ ...p, charId })));
+}
+
+// Remove every photo belonging to a character (used when deleting it).
+export async function deletePhotosFor(charId) {
+  const all = await getAllPhotos();
+  const ids = all.filter((p) => p.charId === charId).map((p) => p.id);
+  if (!ids.length) return;
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    ids.forEach((id) => store.delete(id));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
 

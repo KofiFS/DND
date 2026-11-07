@@ -1,9 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { search as srdSearch, fetchDetail, formatDetail, describe } from "./api.js";
-import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage } from "./idb.js";
+import { addPhoto, getPhotos, deletePhoto, updatePhotoCaption, resizeImage, claimOrphanPhotos, deletePhotosFor } from "./idb.js";
 import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText, meetsPrereq } from "./warlock.js";
-
-const STORAGE_KEY = "dnd-sheet-v1";
+import { loadOrMigrateRoster, saveRoster, loadCharacter, saveCharacter, removeCharacter, summarize, newId } from "./roster.js";
 
 const SHEET_VERSION = 2;
 
@@ -70,6 +69,44 @@ const INITIAL_CHARACTER = {
   // name -> rules text / description (from SRD lookups or typed by hand)
   lore: {},
 };
+
+// An empty level-1 sheet for brand-new characters.
+function blankCharacter(name = "New Character") {
+  return {
+    ...INITIAL_CHARACTER,
+    name, class: "", race: "", background: "", level: 1, proficiencyBonus: 2, patron: "", pact: "",
+    abilities: { strength: 10, dexterity: 10, constitution: 10, intelligence: 10, wisdom: 10, charisma: 10 },
+    combat: { ac: 10, initiative: 0, speed: 30, hp: 10, maxHp: 10, tempHp: 0, hitDice: "1d8" },
+    deathSaves: { successes: 0, failures: 0 },
+    savingThrows: Object.fromEntries(Object.keys(INITIAL_CHARACTER.savingThrows).map(k => [k, { prof: false }])),
+    skills: Object.fromEntries(Object.entries(INITIAL_CHARACTER.skills).map(([k, v]) => [k, { ability: v.ability, prof: false }])),
+    features: [], equipment: [], proficiencies: "",
+    spellcasting: { ability: "CHA", saveDC: 10, attackBonus: 2 },
+    spells: { cantrips: [], level1: [], level2: [], level3: [], level4: [], level5: [] },
+    notes: "", lore: {},
+  };
+}
+
+// Load the roster and the active character once at startup. Adopts an old
+// single-sheet save, and seeds the default character when nothing is stored.
+function bootstrap() {
+  const { roster, migratedLegacyId } = loadOrMigrateRoster();
+  if (migratedLegacyId) claimOrphanPhotos(migratedLegacyId).catch(() => {});
+  if (!roster.ids.length) {
+    const id = newId();
+    const c = { ...INITIAL_CHARACTER, id };
+    saveCharacter(id, c);
+    const r = { activeId: id, ids: [id] };
+    saveRoster(r);
+    return { roster: r, char: c };
+  }
+  const id = roster.activeId;
+  const stored = loadCharacter(id);
+  const c = { ...(stored ? hydrate(stored) : blankCharacter()), id };
+  // Persist one-time migrations immediately so they aren't re-applied.
+  if (!stored || c.sheetVersion !== stored.sheetVersion) saveCharacter(id, c);
+  return { roster, char: c };
+}
 
 const SKILL_LABELS = {
   acrobatics: "Acrobatics", animalHandling: "Animal Handling", arcana: "Arcana",
@@ -278,7 +315,10 @@ function LevelUpModal({ char, onApply, onClose, styles }) {
 
 // ── Main App ──
 export default function DnDSheet() {
-  const [char, setChar] = useState(INITIAL_CHARACTER);
+  const [boot] = useState(bootstrap);
+  const [roster, setRoster] = useState(boot.roster);
+  const [char, setChar] = useState(boot.char);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [tab, setTab] = useState("stats");
   const [saved, setSaved] = useState(false);
   const [addingFeature, setAddingFeature] = useState(false);
@@ -290,30 +330,76 @@ export default function DnDSheet() {
   const [levelUpOpen, setLevelUpOpen] = useState(false);
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const h = hydrate(parsed);
-        setChar(h);
-        // Persist one-time migrations immediately so they aren't re-applied.
-        if (h.sheetVersion !== parsed.sheetVersion) localStorage.setItem(STORAGE_KEY, JSON.stringify(h));
-      }
-    } catch {}
-  }, []);
-
   const save = useCallback((data) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    if (saveCharacter(data.id, data)) {
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
-    } catch {}
+    }
   }, []);
 
+  // Every character carries its own id, so the updater can never move a sheet
+  // onto another character's storage slot.
   const update = useCallback((updater) => {
-    setChar(prev => { const next = updater(prev); save(next); return next; });
+    setChar(prev => { const next = { ...updater(prev), id: prev.id }; save(next); return next; });
   }, [save]);
+
+  // ── Roster (multiple characters) ──
+  const commitRoster = (r) => { setRoster(r); saveRoster(r); };
+
+  const switchTo = (id) => {
+    setPickerOpen(false);
+    if (id === char.id) return;
+    const stored = loadCharacter(id);
+    const next = { ...(stored ? hydrate(stored) : blankCharacter()), id };
+    if (!stored || next.sheetVersion !== stored.sheetVersion) saveCharacter(id, next);
+    setChar(next);
+    commitRoster({ ...roster, activeId: id });
+    setTab("stats");
+  };
+
+  const addCharacter = (data) => {
+    const id = newId();
+    const next = { ...data, id };
+    saveCharacter(id, next);
+    commitRoster({ activeId: id, ids: [...roster.ids, id] });
+    setChar(next);
+    setPickerOpen(false);
+    setTab("stats");
+  };
+
+  const duplicateCharacter = (id) => {
+    const src = id === char.id ? char : loadCharacter(id);
+    if (src) addCharacter({ ...hydrate(src), name: `${src.name || "Character"} (copy)` });
+  };
+
+  const deleteCharacter = (id) => {
+    const src = id === char.id ? char : loadCharacter(id);
+    const label = src?.name || "this character";
+    if (!confirm(`Delete ${label}? This removes the sheet and its photos from this device.`)) return;
+    removeCharacter(id);
+    deletePhotosFor(id).catch(() => {});
+    const ids = roster.ids.filter(x => x !== id);
+    if (!ids.length) {
+      // Always keep one sheet around.
+      const nid = newId();
+      const c = { ...blankCharacter(), id: nid };
+      saveCharacter(nid, c);
+      setChar(c);
+      commitRoster({ activeId: nid, ids: [nid] });
+      setTab("stats");
+      return;
+    }
+    if (id === char.id) {
+      const nextId = ids[0];
+      const stored = loadCharacter(nextId);
+      const next = { ...(stored ? hydrate(stored) : blankCharacter()), id: nextId };
+      setChar(next);
+      commitRoster({ activeId: nextId, ids });
+      setTab("stats");
+    } else {
+      commitRoster({ ...roster, ids });
+    }
+  };
 
   const setAbility = (key, val) => update(c => ({ ...c, abilities: { ...c.abilities, [key]: val } }));
   const setCombat = (key, val) => update(c => ({ ...c, combat: { ...c.combat, [key]: val } }));
@@ -337,7 +423,8 @@ export default function DnDSheet() {
   };
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify(char, null, 2)], { type: "application/json" });
+    const { id: _id, ...portable } = char; // the id is per-device; imports get a fresh one
+    const blob = new Blob([JSON.stringify(portable, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -350,7 +437,7 @@ export default function DnDSheet() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      try { update(() => hydrate(JSON.parse(reader.result))); setTab("stats"); }
+      try { addCharacter(hydrate(JSON.parse(reader.result))); }
       catch { alert("That file could not be read as a character export."); }
     };
     reader.readAsText(file);
@@ -379,6 +466,7 @@ export default function DnDSheet() {
     charName: { fontFamily: "'Cinzel Decorative',serif", fontSize: "1.35rem", fontWeight: 900, color: PALETTE.goldLt, textShadow: "0 0 20px rgba(201,136,42,0.4)", lineHeight: 1.05 },
     charSub: { fontFamily: "Cinzel,serif", fontSize: "0.6rem", letterSpacing: 2, color: "#c9882aaa", marginTop: 4 },
     lvChip: { fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, color: PALETTE.darkA, background: `linear-gradient(135deg,${PALETTE.goldLt},${PALETTE.gold})`, borderRadius: 20, padding: "3px 9px", fontWeight: 700, whiteSpace: "nowrap" },
+    switchBtn: { fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, color: PALETTE.goldLt, background: "rgba(201,136,42,0.12)", border: `1px solid ${PALETTE.gold}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", whiteSpace: "nowrap" },
     savedBadge: { fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 2, color: "#7fe089", background: "rgba(76,175,80,0.15)", border: "1px solid rgba(76,175,80,0.35)", borderRadius: 20, padding: "2px 8px", transition: "opacity 0.3s", opacity: saved ? 1 : 0 },
     tabBar: { display: "flex", overflowX: "auto", background: "#0f0804", borderBottom: "1px solid #3d1a05", position: "sticky", top: 62, zIndex: 49, scrollbarWidth: "none" },
     tabBtn: (active) => ({ flex: "0 0 auto", minWidth: 62, padding: "7px 12px 6px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, textTransform: "uppercase", border: "none", cursor: "pointer", background: active ? `linear-gradient(180deg,${PALETTE.darkB},${PALETTE.darkA})` : "transparent", color: active ? PALETTE.goldLt : "#8b5e1a", borderBottom: active ? `2px solid ${PALETTE.gold}` : "2px solid transparent", transition: "all 0.15s" }),
@@ -486,12 +574,11 @@ export default function DnDSheet() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button style={styles.addBtn} onClick={handleExport}>⬇ Export JSON</button>
         <button style={styles.addBtn} onClick={() => fileInputRef.current?.click()}>⬆ Import JSON</button>
-        <button onClick={() => { if (confirm("Reset to the original character? This overwrites your current sheet.")) update(() => INITIAL_CHARACTER); }}
-          style={{ ...styles.addBtn, background: "rgba(122,28,28,0.15)", borderColor: PALETTE.rust, color: PALETTE.rust }}>↺ Reset</button>
-        <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+        <button onClick={() => { if (confirm("Clear this sheet back to a blank level-1 character? Other characters are not affected.")) update(c => blankCharacter(c.name)); }}
+          style={{ ...styles.addBtn, background: "rgba(122,28,28,0.15)", borderColor: PALETTE.rust, color: PALETTE.rust }}>↺ Clear Sheet</button>
       </div>
       <div style={{ fontSize: "0.72rem", color: PALETTE.inkSoft, marginTop: 8, lineHeight: 1.45 }}>
-        Auto-saves on this device. Export a JSON backup to copy your sheet to another device. (Photos in the Paper tab stay on this device.)
+        Auto-saves on this device. Export a JSON backup to copy this character to another device; importing adds it as a new character. (Photos in the Paper tab stay on this device.)
       </div>
     </div>
   );
@@ -672,12 +759,15 @@ export default function DnDSheet() {
 
       <div style={styles.header}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, cursor: "pointer" }} onClick={() => setPickerOpen(true)} title="Switch character">
             <div style={styles.charName}>{s.name}</div>
-            <div style={styles.charSub}>{s.class} · {s.race}</div>
+            <div style={styles.charSub}>{[s.class, s.race].filter(Boolean).join(" · ") || "Tap to switch character"}</div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
-            <span style={styles.lvChip}>LV {s.level}</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button style={styles.switchBtn} onClick={() => setPickerOpen(true)} title="Switch character">⇄ {roster.ids.length}</button>
+              <span style={styles.lvChip}>LV {s.level}</span>
+            </div>
             <span style={styles.savedBadge}>✓ SAVED</span>
           </div>
         </div>
@@ -699,10 +789,60 @@ export default function DnDSheet() {
         {tab === "gear" && gearTab()}
         {tab === "class" && <ClassTab char={s} update={update} setLore={setLore} styles={styles} SectionTitle={SectionTitle} />}
         {tab === "codex" && <CodexTab styles={styles} setLore={setLore} update={update} SectionTitle={SectionTitle} />}
-        {tab === "paper" && <PhotoTab styles={styles} SectionTitle={SectionTitle} />}
+        {tab === "paper" && <PhotoTab key={s.id} charId={s.id} styles={styles} SectionTitle={SectionTitle} />}
       </div>
 
+      <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+
       {levelUpOpen && <LevelUpModal char={s} styles={styles} onApply={applyLevelUp} onClose={() => setLevelUpOpen(false)} />}
+      {pickerOpen && (
+        <CharacterPicker styles={styles} activeId={s.id}
+          characters={summarize(roster.ids).map(x => x.id === s.id ? { ...x, name: s.name, class: s.class, race: s.race, level: s.level } : x)}
+          onSelect={switchTo} onNew={() => addCharacter(blankCharacter())} onImport={() => fileInputRef.current?.click()}
+          onDuplicate={duplicateCharacter} onDelete={deleteCharacter} onClose={() => setPickerOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// ── Character picker (switch / create / duplicate / delete) ──
+function CharacterPicker({ characters, activeId, onSelect, onNew, onImport, onDuplicate, onDelete, onClose, styles }) {
+  const iconBtn = { background: "none", border: `1px solid rgba(201,136,42,0.5)`, borderRadius: 6, color: PALETTE.inkSoft, cursor: "pointer", fontSize: "0.85rem", width: 28, height: 28, lineHeight: 1, flexShrink: 0 };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 380, maxHeight: "85vh", overflowY: "auto", background: PALETTE.parchment, borderRadius: 14, border: `2px solid ${PALETTE.gold}`, padding: 18, boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }}>
+        <div style={{ fontFamily: "'Cinzel Decorative',serif", fontSize: "1.2rem", color: PALETTE.rust, textAlign: "center", marginBottom: 2 }}>Characters</div>
+        <div style={{ textAlign: "center", fontFamily: "Cinzel,serif", color: PALETTE.inkSoft, fontSize: "0.6rem", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 14 }}>
+          {characters.length} on this device
+        </div>
+
+        {characters.map(c => {
+          const active = c.id === activeId;
+          return (
+            <div key={c.id} style={{ ...styles.card, display: "flex", alignItems: "center", gap: 10, padding: "9px 10px 9px 12px", cursor: "pointer",
+              border: active ? `1.5px solid ${PALETTE.gold}` : styles.card.border, background: active ? "rgba(201,136,42,0.14)" : styles.card.background }}
+              onClick={() => onSelect(c.id)}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: "Cinzel,serif", fontWeight: 700, fontSize: "0.9rem", color: active ? PALETTE.rust : PALETTE.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {active && <span style={{ color: PALETTE.gold, marginRight: 6 }}>✦</span>}{c.name}
+                </div>
+                <div style={{ fontFamily: "Cinzel,serif", fontSize: "0.58rem", letterSpacing: 1, color: PALETTE.inkSoft, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {[c.class, c.race].filter(Boolean).join(" · ") || "No class set"}
+                </div>
+              </div>
+              <span style={styles.lvChip}>LV {c.level}</span>
+              <button style={iconBtn} title="Duplicate" onClick={e => { e.stopPropagation(); onDuplicate(c.id); }}>⧉</button>
+              <button style={{ ...iconBtn, color: PALETTE.rust, borderColor: "rgba(122,28,28,0.5)" }} title="Delete" onClick={e => { e.stopPropagation(); onDelete(c.id); }}>×</button>
+            </div>
+          );
+        })}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <button style={{ ...styles.btn, flex: 1 }} onClick={onNew}>+ New Character</button>
+          <button style={{ ...styles.btnGhost, flex: 1 }} onClick={onImport}>⬆ Import JSON</button>
+        </div>
+        <button style={{ ...styles.btnGhost, width: "100%", marginTop: 8, borderColor: "rgba(92,68,34,0.5)", color: PALETTE.inkSoft }} onClick={onClose}>Close</button>
+      </div>
     </div>
   );
 }
@@ -1007,7 +1147,7 @@ function CodexTab({ styles, setLore, update, SectionTitle }) {
 }
 
 // ── PAPER (photo attachments) ──
-function PhotoTab({ styles, SectionTitle }) {
+function PhotoTab({ styles, SectionTitle, charId }) {
   const [photos, setPhotos] = useState(null);
   const [viewer, setViewer] = useState(null);
   const [zoom, setZoom] = useState(false);
@@ -1015,8 +1155,8 @@ function PhotoTab({ styles, SectionTitle }) {
   const uploadRef = useRef(null);
   const cameraRef = useRef(null);
 
-  const reload = async () => { try { setPhotos(await getPhotos()); } catch { setPhotos([]); } };
-  useEffect(() => { reload(); }, []);
+  const reload = async () => { try { setPhotos(await getPhotos(charId)); } catch { setPhotos([]); } };
+  useEffect(() => { setPhotos(null); reload(); }, [charId]);
 
   const onFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -1026,7 +1166,7 @@ function PhotoTab({ styles, SectionTitle }) {
       try {
         const dataUrl = await resizeImage(f);
         const id = (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        await addPhoto({ id, dataUrl, caption: "", created: Date.now() });
+        await addPhoto({ id, charId, dataUrl, caption: "", created: Date.now() });
       } catch {}
     }
     e.target.value = "";
@@ -1041,7 +1181,7 @@ function PhotoTab({ styles, SectionTitle }) {
     <div>
       <SectionTitle>Paper Sheet Photos</SectionTitle>
       <div style={{ fontSize: "0.8rem", color: PALETTE.inkSoft, marginBottom: 12, lineHeight: 1.45 }}>
-        Snap or upload photos of your paper character sheet to keep as reference. Tap a photo to view it full-screen and zoom in while you copy values across.
+        Snap or upload photos of this character's paper sheet to keep as reference. Tap a photo to view it full-screen and zoom in while you copy values across.
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
