@@ -5,6 +5,7 @@ import { WARLOCK_TABLE, rowFor, CLASS_FEATURES, PATRONS, INVOCATIONS, prereqText
 import { loadOrMigrateRoster, saveRoster, loadCharacter, saveCharacter, removeCharacter, summarize, newId } from "./roster.js";
 import { ROGUE_TABLE, rogueRowFor, ROGUE_FEATURES, ARCHETYPES, atSpellsFor } from "./rogue.js";
 import { PRESETS } from "./presets.js";
+import { requestUpdate, applyOps, loadApiKey, saveApiKey, MODEL as AI_MODEL } from "./ai.js";
 
 const SHEET_VERSION = 2;
 
@@ -478,7 +479,7 @@ export default function DnDSheet() {
     tabBar: { display: "flex", overflowX: "auto", background: "#0f0804", borderBottom: "1px solid #3d1a05", position: "sticky", top: 62, zIndex: 49, scrollbarWidth: "none" },
     tabBtn: (active) => ({ flex: "0 0 auto", minWidth: 62, padding: "7px 12px 6px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, fontFamily: "Cinzel,serif", fontSize: "0.55rem", letterSpacing: 1, textTransform: "uppercase", border: "none", cursor: "pointer", background: active ? `linear-gradient(180deg,${PALETTE.darkB},${PALETTE.darkA})` : "transparent", color: active ? PALETTE.goldLt : "#8b5e1a", borderBottom: active ? `2px solid ${PALETTE.gold}` : "2px solid transparent", transition: "all 0.15s" }),
     tabIcon: (active) => ({ fontSize: "0.95rem", color: active ? PALETTE.goldLt : "#7a521a", lineHeight: 1 }),
-    page: { padding: "16px", background: PALETTE.parchment, backgroundImage: "linear-gradient(160deg,#f8eedc 0%,#eedfc0 100%)", minHeight: "calc(100vh - 108px)" },
+    page: { padding: "16px 16px 110px", background: PALETTE.parchment, backgroundImage: "linear-gradient(160deg,#f8eedc 0%,#eedfc0 100%)", minHeight: "calc(100vh - 108px)" },
     sectionTitle: { fontFamily: "Cinzel,serif", fontSize: "0.58rem", letterSpacing: 3, textTransform: "uppercase", color: PALETTE.rust, display: "flex", alignItems: "center", gap: 7, borderBottom: "1px solid rgba(201,136,42,0.4)", paddingBottom: 5, marginBottom: 10, marginTop: 18 },
     card: { background: "rgba(255,250,240,0.65)", border: "1px solid rgba(201,136,42,0.3)", borderRadius: 12, padding: "10px 13px", marginBottom: 10, boxShadow: "0 1px 4px rgba(120,80,20,0.06)" },
     btn: { fontFamily: "Cinzel,serif", fontSize: "0.62rem", letterSpacing: 1.2, textTransform: "uppercase", background: `linear-gradient(135deg,${PALETTE.darkB},${PALETTE.darkC})`, border: `1px solid ${PALETTE.gold}`, borderRadius: 8, color: PALETTE.goldLt, padding: "8px 14px", cursor: "pointer" },
@@ -804,6 +805,8 @@ export default function DnDSheet() {
 
       <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
 
+      <AiUpdateBar char={s} update={update} styles={styles} />
+
       {levelUpOpen && <LevelUpModal char={s} styles={styles} onApply={applyLevelUp} onClose={() => setLevelUpOpen(false)} />}
       {pickerOpen && (
         <CharacterPicker styles={styles} activeId={s.id}
@@ -813,6 +816,101 @@ export default function DnDSheet() {
           onPreset={(data) => addCharacter(hydrate(JSON.parse(JSON.stringify(data))))}
           onDuplicate={duplicateCharacter} onDelete={deleteCharacter} onClose={() => setPickerOpen(false)} />
       )}
+    </div>
+  );
+}
+
+// ── DND Update: ask Claude to change the sheet in plain English ──
+function AiUpdateBar({ char, update, styles }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);          // expanded result / settings panel
+  const [result, setResult] = useState(null);       // { summary, applied, rejected, error }
+  const [undo, setUndo] = useState(null);           // previous character for Undo
+  const [apiKey, setApiKey] = useState(loadApiKey);
+  const [editingKey, setEditingKey] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+
+  const submit = async () => {
+    const instruction = text.trim();
+    if (!instruction || busy) return;
+    if (!apiKey) { setEditingKey(true); setOpen(true); return; }
+    setBusy(true); setOpen(true); setResult(null);
+    try {
+      const { ops, summary } = await requestUpdate({ apiKey, char, instruction });
+      if (ops.length) {
+        const before = char;
+        let outcome = null;
+        update((c) => { outcome = applyOps(c, ops); return outcome.char; });
+        setUndo(before);
+        setResult({ summary, applied: outcome?.applied || [], rejected: outcome?.rejected || [] });
+      } else {
+        setResult({ summary, applied: [], rejected: [] });
+      }
+      setText("");
+    } catch (e) {
+      const status = e?.status;
+      const msg = status === 401 ? "That API key was rejected. Check it under ⚙."
+        : status === 429 ? "Rate limited by the API. Try again in a moment."
+        : status === 400 && /credit|billing/i.test(e?.message || "") ? "Your Anthropic account has no credit. Add some at console.anthropic.com."
+        : e?.message || "The request failed.";
+      setResult({ summary: "", applied: [], rejected: [], error: msg });
+    }
+    setBusy(false);
+  };
+
+  const doUndo = () => { if (!undo) return; update(() => ({ ...undo, id: char.id })); setUndo(null); setResult({ summary: "Reverted the last AI change.", applied: [], rejected: [] }); };
+  const saveKey = () => { const k = keyDraft.trim(); saveApiKey(k); setApiKey(k); setKeyDraft(""); setEditingKey(false); };
+
+  const label = { fontFamily: "Cinzel,serif", fontSize: "0.5rem", letterSpacing: 2, textTransform: "uppercase", color: PALETTE.goldLt };
+  return (
+    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 60, display: "flex", justifyContent: "center", pointerEvents: "none" }}>
+      <div style={{ width: "100%", maxWidth: 480, pointerEvents: "auto", background: `linear-gradient(180deg,${PALETTE.darkB},${PALETTE.darkA})`, borderTop: `2px solid ${PALETTE.gold}`, boxShadow: "0 -6px 24px rgba(0,0,0,0.45)", padding: "8px 12px calc(10px + env(safe-area-inset-bottom))" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+          <span style={label}>✦ DND Update</span>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            {undo && <button onClick={doUndo} style={{ ...label, background: "none", border: "none", cursor: "pointer", color: "#f0c674" }}>↶ Undo</button>}
+            {(result || editingKey) && <button onClick={() => setOpen((o) => !o)} style={{ ...label, background: "none", border: "none", cursor: "pointer", color: "#c9882aaa" }}>{open ? "Hide" : "Show"}</button>}
+            <button title="API key settings" onClick={() => { setEditingKey((v) => !v); setOpen(true); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#c9882aaa", fontSize: "0.9rem", lineHeight: 1 }}>⚙</button>
+          </div>
+        </div>
+
+        {open && editingKey && (
+          <div style={{ background: "rgba(245,234,214,0.08)", border: "1px solid rgba(201,136,42,0.4)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, color: "#f5ead6", fontSize: "0.78rem", lineHeight: 1.45 }}>
+            <div style={{ ...label, marginBottom: 4 }}>Anthropic API key</div>
+            {apiKey ? <div style={{ marginBottom: 6 }}>A key is saved on this device (…{apiKey.slice(-4)}).</div>
+              : <div style={{ marginBottom: 6 }}>Paste an API key from <b>console.anthropic.com</b>. It is stored only in this browser and sent only to Anthropic. Each update costs a few cents (model: {AI_MODEL}).</div>}
+            <div style={{ display: "flex", gap: 6 }}>
+              <input type="password" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)} placeholder="sk-ant-…" autoComplete="off"
+                onKeyDown={(e) => { if (e.key === "Enter") saveKey(); }}
+                style={{ flex: 1, background: "rgba(245,234,214,0.92)", border: `1px solid ${PALETTE.gold}`, borderRadius: 6, color: PALETTE.ink, fontFamily: "inherit", fontSize: "0.85rem", padding: "6px 8px" }} />
+              <button onClick={saveKey} disabled={!keyDraft.trim()} style={{ ...styles.smallBtn, color: PALETTE.goldLt, background: "rgba(201,136,42,0.2)" }}>Save</button>
+              {apiKey && <button onClick={() => { saveApiKey(""); setApiKey(""); }} style={{ ...styles.smallBtn, color: "#f0a0a0", borderColor: "#a04040", background: "transparent" }}>Forget</button>}
+            </div>
+          </div>
+        )}
+
+        {open && result && (
+          <div style={{ background: "rgba(245,234,214,0.08)", border: `1px solid ${result.error ? "#a04040" : "rgba(201,136,42,0.4)"}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8, color: "#f5ead6", fontSize: "0.82rem", lineHeight: 1.45 }}>
+            {result.error ? <span style={{ color: "#f0a0a0" }}>{result.error}</span> : <span>{result.summary}</span>}
+            {result.applied.length > 0 && (
+              <div style={{ marginTop: 5, fontSize: "0.7rem", color: "#c9b28a", fontFamily: "monospace", lineHeight: 1.4 }}>
+                {result.applied.map((a, i) => <div key={i}>✓ {a}</div>)}
+                {result.rejected.map((r, i) => <div key={"r" + i} style={{ color: "#f0a0a0" }}>✗ skipped: {r}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 6 }}>
+          <input value={text} onChange={(e) => setText(e.target.value)} disabled={busy}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder={apiKey ? "e.g. “I took 8 damage” or “add Fireball”" : "Tap ⚙ to add your API key, then type here"}
+            style={{ flex: 1, minWidth: 0, background: "rgba(245,234,214,0.92)", border: `1px solid ${PALETTE.gold}`, borderRadius: 8, color: PALETTE.ink, fontFamily: "'Crimson Text',serif", fontSize: "0.95rem", padding: "8px 10px" }} />
+          <button onClick={submit} disabled={busy || !text.trim()}
+            style={{ ...styles.btn, padding: "8px 14px", opacity: busy || !text.trim() ? 0.6 : 1, whiteSpace: "nowrap" }}>{busy ? "…" : "Update"}</button>
+        </div>
+      </div>
     </div>
   );
 }
